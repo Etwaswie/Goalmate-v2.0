@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GoalMate</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark">GM</div>
+          <div>
+            <div class="brand-title">GoalMate</div>
+            <div class="brand-subtitle">Progress Operating System</div>
+          </div>
+        </div>
+        <nav class="nav" id="nav"></nav>
+        <div class="sidebar-footer">
+          <div class="sidebar-card">
+            <div class="eyebrow">B2B + B2C</div>
+            <strong>Один движок</strong>
+            <p>Организатор запускает поток, участник превращает опыт в приватный челлендж.</p>
+          </div>
+        </div>
+      </aside>
+
+      <div class="layout">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow" id="topbar-label">Рабочая демка</div>
+            <h1 id="topbar-title">GoalMate</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="role-switch" id="role-switch"></div>
+            <button class="ghost-button" id="reset-demo-button" type="button">Сбросить демо</button>
+          </div>
+        </header>
+
+        <main id="view-root" class="view-root">
+          <section class="loading-state">
+            <div class="spinner"></div>
+            <p>GoalMate загружается...</p>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="modal">
+      <div class="modal-backdrop" data-close-modal="true"></div>
+      <div class="modal-card" id="modal-card"></div>
+    </div>
+
+    <div class="toast hidden" id="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
