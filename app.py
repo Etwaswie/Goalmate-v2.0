@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+import sqlite3
 
 from goalmate.auth import (
     SESSION_COOKIE_NAME,
@@ -20,13 +20,15 @@ from goalmate.auth import (
 )
 from goalmate.config import load_config
 from goalmate.context import RequestContext, get_request_context
+from goalmate.db import build_database_settings, connect_database, ensure_sqlite_data_dir
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 CONFIG = load_config(ROOT_DIR)
 STATIC_DIR = CONFIG.static_dir
 DATA_DIR = CONFIG.data_dir
-DB_PATH = CONFIG.db_path
+DB_SETTINGS = build_database_settings(CONFIG)
+DB_PATH = DB_SETTINGS.sqlite_path if DB_SETTINGS.sqlite_path is not None else CONFIG.db_path
 
 DEMO_AUTH_USERS = [
     {
@@ -354,10 +356,7 @@ def current_request_context(handler: BaseHTTPRequestHandler | None = None) -> Re
 
 
 def connect_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return connect_database(DB_SETTINGS)
 
 
 def parse_cookies(handler: BaseHTTPRequestHandler | None) -> dict[str, str]:
@@ -1224,7 +1223,14 @@ def switch_session_scope(payload: dict, context: RequestContext | None = None) -
 
 
 def init_db(force_reset: bool = False) -> None:
+    if not DB_SETTINGS.is_sqlite:
+        raise RuntimeError(
+            "GoalMate сейчас умеет запускаться только на SQLite runtime. "
+            "PostgreSQL backend уже распознан конфигом, но адаптер будет подключен в следующей итерации."
+        )
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_sqlite_data_dir(DB_SETTINGS)
     if force_reset and DB_PATH.exists():
         DB_PATH.unlink()
 
@@ -2021,6 +2027,8 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
                 "host": f"http://{CONFIG.host}:{CONFIG.port}",
                 "appEnv": CONFIG.app_env,
                 "contextSource": context.source,
+                "databaseBackend": DB_SETTINGS.backend,
+                "databaseTarget": DB_SETTINGS.label,
             },
             "program": program,
             "organizer": organizer,
