@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler
+
+from goalmate.config import AppConfig
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    organizer_id: int
+    program_id: int
+    participant_id: int
+    source: str
+
+
+def get_request_context(config: AppConfig, handler: BaseHTTPRequestHandler | None = None) -> RequestContext:
+    # This stays on a development fallback until real auth/session resolution lands.
+    _ = handler
+    return RequestContext(
+        organizer_id=config.dev_organizer_id,
+        program_id=config.dev_program_id,
+        participant_id=config.dev_participant_id,
+        source="development-fallback",
+    )

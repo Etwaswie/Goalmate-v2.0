@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -9,17 +8,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from goalmate.config import load_config
+from goalmate.context import RequestContext, get_request_context
+
 
 ROOT_DIR = Path(__file__).resolve().parent
-STATIC_DIR = ROOT_DIR / "static"
-DATA_DIR = ROOT_DIR / "data"
-DB_PATH = DATA_DIR / "goalmate.db"
-HOST = "127.0.0.1"
-PORT = int(os.environ.get("PORT", "8000"))
-
-CURRENT_ORGANIZER_ID = 1
-CURRENT_PROGRAM_ID = 1
-CURRENT_PARTICIPANT_ID = 1
+CONFIG = load_config(ROOT_DIR)
+STATIC_DIR = CONFIG.static_dir
+DATA_DIR = CONFIG.data_dir
+DB_PATH = CONFIG.db_path
 
 
 SCHEMA_SQL = """
@@ -214,6 +211,10 @@ def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat(sep=" ")
 
 
+def current_request_context(handler: BaseHTTPRequestHandler | None = None) -> RequestContext:
+    return get_request_context(CONFIG, handler)
+
+
 def connect_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -245,7 +246,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            CURRENT_ORGANIZER_ID,
+            CONFIG.dev_organizer_id,
             "Мария Волкова",
             "maria@goalmate.local",
             "Habit Power",
@@ -259,7 +260,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
     programs = [
         (
             1,
-            CURRENT_ORGANIZER_ID,
+            CONFIG.dev_organizer_id,
             None,
             "Весенний wellness-марафон Habit Power",
             "spring-wellness",
@@ -271,7 +272,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         ),
         (
             2,
-            CURRENT_ORGANIZER_ID,
+            CONFIG.dev_organizer_id,
             None,
             "Зимний перезапуск привычек",
             "winter-reset",
@@ -670,7 +671,9 @@ def get_modules_with_tasks(conn: sqlite3.Connection, program_id: int) -> list[di
     return modules
 
 
-def get_bootstrap_state() -> dict:
+def get_bootstrap_state(context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     with connect_db() as conn:
         program = row_to_dict(conn.execute(
             """
@@ -679,17 +682,17 @@ def get_bootstrap_state() -> dict:
             JOIN organizers o ON o.id = p.organizer_id
             WHERE p.id = ?
             """,
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchone())
 
         organizer = row_to_dict(conn.execute(
             "SELECT * FROM organizers WHERE id = ?",
-            (CURRENT_ORGANIZER_ID,),
+            (context.organizer_id,),
         ).fetchone())
 
         participant = row_to_dict(conn.execute(
             "SELECT * FROM participants WHERE id = ?",
-            (CURRENT_PARTICIPANT_ID,),
+            (context.participant_id,),
         ).fetchone())
 
         enrollment = row_to_dict(conn.execute(
@@ -697,7 +700,7 @@ def get_bootstrap_state() -> dict:
             SELECT * FROM enrollments
             WHERE program_id = ? AND participant_id = ?
             """,
-            (CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
+            (context.program_id, context.participant_id),
         ).fetchone())
 
         task_rows = conn.execute(
@@ -740,7 +743,7 @@ def get_bootstrap_state() -> dict:
                 END,
                 t.position
             """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
+            (context.participant_id, context.program_id),
         ).fetchall()
 
         participant_tasks = []
@@ -756,7 +759,7 @@ def get_bootstrap_state() -> dict:
             WHERE participant_id = ? AND program_id = ?
             ORDER BY is_read ASC, created_at DESC
             """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
+            (context.participant_id, context.program_id),
         ).fetchall()]
 
         leaderboard_rows = [row_to_dict(row) for row in conn.execute(
@@ -776,13 +779,13 @@ def get_bootstrap_state() -> dict:
             WHERE e.program_id = ?
             ORDER BY e.xp DESC, e.progress_percent DESC, p.full_name ASC
             """,
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchall()]
         for index, row in enumerate(leaderboard_rows, start=1):
             row["rank"] = index
 
         top_three = leaderboard_rows[:3]
-        current_rank = next((row["rank"] for row in leaderboard_rows if row["participant_id"] == CURRENT_PARTICIPANT_ID), None)
+        current_rank = next((row["rank"] for row in leaderboard_rows if row["participant_id"] == context.participant_id), None)
 
         current_team = row_to_dict(conn.execute(
             """
@@ -791,7 +794,7 @@ def get_bootstrap_state() -> dict:
             JOIN team_members tm ON tm.team_id = t.id
             WHERE tm.participant_id = ? AND t.program_id = ?
             """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
+            (context.participant_id, context.program_id),
         ).fetchone())
 
         team_members = [row_to_dict(row) for row in conn.execute(
@@ -810,7 +813,7 @@ def get_bootstrap_state() -> dict:
             WHERE tm.team_id = ?
             ORDER BY e.xp DESC
             """,
-            (CURRENT_PROGRAM_ID, current_team["id"]),
+            (context.program_id, current_team["id"]),
         ).fetchall()]
 
         team_xp = sum(member["xp"] for member in team_members)
@@ -836,7 +839,7 @@ def get_bootstrap_state() -> dict:
             ORDER BY r.submitted_at DESC
             LIMIT 6
             """,
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchall()]
 
         at_risk = [row_to_dict(row) for row in conn.execute(
@@ -854,7 +857,7 @@ def get_bootstrap_state() -> dict:
             WHERE e.program_id = ? AND e.at_risk = 1
             ORDER BY p.last_active_at ASC
             """,
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchall()]
 
         metrics = [row_to_dict(row) for row in conn.execute(
@@ -864,7 +867,7 @@ def get_bootstrap_state() -> dict:
             WHERE program_id = ?
             ORDER BY metric_date ASC
             """,
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchall()]
 
         private_challenges = [row_to_dict(row) for row in conn.execute(
@@ -908,7 +911,7 @@ def get_bootstrap_state() -> dict:
             GROUP BY p.id
             ORDER BY p.id DESC
             """,
-            (CURRENT_ORGANIZER_ID,),
+            (context.organizer_id,),
         ).fetchall()]
 
         unread_notifications = sum(1 for item in notifications if item["is_read"] == 0)
@@ -921,7 +924,9 @@ def get_bootstrap_state() -> dict:
             "meta": {
                 "projectName": "GoalMate",
                 "currentDate": str(date.today()),
-                "host": f"http://{HOST}:{PORT}",
+                "host": f"http://{CONFIG.host}:{CONFIG.port}",
+                "appEnv": CONFIG.app_env,
+                "contextSource": context.source,
             },
             "program": program,
             "organizer": organizer,
@@ -983,7 +988,7 @@ def get_bootstrap_state() -> dict:
                 ],
             },
             "builder": {
-                "modules": get_modules_with_tasks(conn, CURRENT_PROGRAM_ID),
+                "modules": get_modules_with_tasks(conn, context.program_id),
                 "reusablePrograms": reusable_programs,
             },
             "analytics": {
@@ -998,7 +1003,15 @@ def get_bootstrap_state() -> dict:
         }
 
 
-def add_notification(conn: sqlite3.Connection, title: str, message: str, notification_type: str, reason: str, cta_label: str) -> None:
+def add_notification(
+    conn: sqlite3.Connection,
+    context: RequestContext,
+    title: str,
+    message: str,
+    notification_type: str,
+    reason: str,
+    cta_label: str,
+) -> None:
     conn.execute(
         """
         INSERT INTO notifications (
@@ -1007,8 +1020,8 @@ def add_notification(conn: sqlite3.Connection, title: str, message: str, notific
         ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
         (
-            CURRENT_PARTICIPANT_ID,
-            CURRENT_PROGRAM_ID,
+            context.participant_id,
+            context.program_id,
             title,
             message,
             notification_type,
@@ -1019,14 +1032,14 @@ def add_notification(conn: sqlite3.Connection, title: str, message: str, notific
     )
 
 
-def refresh_progress(conn: sqlite3.Connection, participant_id: int) -> None:
+def refresh_progress(conn: sqlite3.Connection, context: RequestContext, participant_id: int) -> None:
     enrollment = conn.execute(
         """
         SELECT completed_tasks, total_tasks
         FROM enrollments
         WHERE program_id = ? AND participant_id = ?
         """,
-        (CURRENT_PROGRAM_ID, participant_id),
+        (context.program_id, participant_id),
     ).fetchone()
     if enrollment is None:
         return
@@ -1039,7 +1052,7 @@ def refresh_progress(conn: sqlite3.Connection, participant_id: int) -> None:
         SET progress_percent = ?
         WHERE program_id = ? AND participant_id = ?
         """,
-        (progress, CURRENT_PROGRAM_ID, participant_id),
+        (progress, context.program_id, participant_id),
     )
 
 
@@ -1050,7 +1063,9 @@ def touch_participant(conn: sqlite3.Connection, participant_id: int) -> None:
     )
 
 
-def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
+def complete_task(participant_task_id: int, context: RequestContext | None = None, via_report: bool = False) -> dict:
+    context = context or current_request_context()
+
     with connect_db() as conn:
         record = conn.execute(
             """
@@ -1059,7 +1074,7 @@ def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
             JOIN tasks t ON t.id = pt.task_id
             WHERE pt.id = ? AND pt.participant_id = ?
             """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
+            (participant_task_id, context.participant_id),
         ).fetchone()
         if record is None:
             raise ValueError("Задача не найдена")
@@ -1085,7 +1100,7 @@ def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
                     at_risk = 0
                 WHERE program_id = ? AND participant_id = ?
                 """,
-                (record["points"], CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
+                (record["points"], context.program_id, context.participant_id),
             )
             conn.execute(
                 """
@@ -1094,12 +1109,13 @@ def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
                     last_active_at = ?
                 WHERE id = ?
                 """,
-                (now_iso(), CURRENT_PARTICIPANT_ID),
+                (now_iso(), context.participant_id),
             )
-            refresh_progress(conn, CURRENT_PARTICIPANT_ID)
+            refresh_progress(conn, context, context.participant_id)
             if via_report:
                 add_notification(
                     conn,
+                    context,
                     "Отчёт принят",
                     f"Задача '{record['title']}' засчитана. Прогресс обновлён автоматически.",
                     "report",
@@ -1109,19 +1125,22 @@ def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
             else:
                 add_notification(
                     conn,
+                    context,
                     "Шаг закрыт",
                     f"Задача '{record['title']}' завершена. Темп удержан без лишнего давления.",
                     "progress",
                     "task_completed",
                     "Посмотреть задачи",
                 )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
+        touch_participant(conn, context.participant_id)
         conn.commit()
 
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def soft_return_task(participant_task_id: int) -> dict:
+def soft_return_task(participant_task_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     with connect_db() as conn:
         record = conn.execute(
             """
@@ -1130,7 +1149,7 @@ def soft_return_task(participant_task_id: int) -> dict:
             JOIN tasks t ON t.id = pt.task_id
             WHERE pt.id = ? AND pt.participant_id = ?
             """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
+            (participant_task_id, context.participant_id),
         ).fetchone()
         if record is None:
             raise ValueError("Задача не найдена")
@@ -1156,11 +1175,12 @@ def soft_return_task(participant_task_id: int) -> dict:
                 at_risk = 0
             WHERE program_id = ? AND participant_id = ?
             """,
-            (CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
+            (context.program_id, context.participant_id),
         )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
+        touch_participant(conn, context.participant_id)
         add_notification(
             conn,
+            context,
             "Мягкий возврат активирован",
             f"Задача '{record['title']}' снова в работе. Прогресс не обнулился.",
             "soft_return",
@@ -1169,10 +1189,12 @@ def soft_return_task(participant_task_id: int) -> dict:
         )
         conn.commit()
 
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def submit_report(payload: dict) -> dict:
+def submit_report(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     participant_task_id = int(payload.get("participantTaskId", 0))
     report_type = str(payload.get("reportType", "text")).strip() or "text"
     content = str(payload.get("content", "")).strip()
@@ -1191,7 +1213,7 @@ def submit_report(payload: dict) -> dict:
             JOIN tasks t ON t.id = pt.task_id
             WHERE pt.id = ? AND pt.participant_id = ?
             """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
+            (participant_task_id, context.participant_id),
         ).fetchone()
         if task is None:
             raise ValueError("Задача для отчёта не найдена")
@@ -1219,7 +1241,7 @@ def submit_report(payload: dict) -> dict:
                 """,
                 (
                     participant_task_id,
-                    CURRENT_PARTICIPANT_ID,
+                    context.participant_id,
                     task["task_id"],
                     report_type,
                     content,
@@ -1227,13 +1249,15 @@ def submit_report(payload: dict) -> dict:
                     now_iso(),
                 ),
             )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
+        touch_participant(conn, context.participant_id)
         conn.commit()
 
-    return complete_task(participant_task_id, via_report=True)
+    return complete_task(participant_task_id, context=context, via_report=True)
 
 
-def mark_notification_read(notification_id: int) -> dict:
+def mark_notification_read(notification_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     with connect_db() as conn:
         conn.execute(
             """
@@ -1241,13 +1265,15 @@ def mark_notification_read(notification_id: int) -> dict:
             SET is_read = 1
             WHERE id = ? AND participant_id = ?
             """,
-            (notification_id, CURRENT_PARTICIPANT_ID),
+            (notification_id, context.participant_id),
         )
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def create_module(payload: dict) -> dict:
+def create_module(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
     week_label = str(payload.get("weekLabel", "")).strip() or "Новая неделя"
@@ -1257,20 +1283,22 @@ def create_module(payload: dict) -> dict:
     with connect_db() as conn:
         position = conn.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM modules WHERE program_id = ?",
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchone()["next_position"]
         conn.execute(
             """
             INSERT INTO modules (program_id, title, description, week_label, position)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (CURRENT_PROGRAM_ID, title, description or "Новый блок в конструкторе GoalMate.", week_label, position),
+            (context.program_id, title, description or "Новый блок в конструкторе GoalMate.", week_label, position),
         )
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def create_task(payload: dict) -> dict:
+def create_task(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     module_id = int(payload.get("moduleId", 0))
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -1296,7 +1324,7 @@ def create_task(payload: dict) -> dict:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                CURRENT_PROGRAM_ID,
+                context.program_id,
                 module_id,
                 title,
                 description or "Новое задание из конструктора GoalMate.",
@@ -1313,7 +1341,7 @@ def create_task(payload: dict) -> dict:
 
         participants = [row["participant_id"] for row in conn.execute(
             "SELECT participant_id FROM enrollments WHERE program_id = ?",
-            (CURRENT_PROGRAM_ID,),
+            (context.program_id,),
         ).fetchall()]
         for participant_id in participants:
             conn.execute(
@@ -1337,18 +1365,20 @@ def create_task(payload: dict) -> dict:
                 SET total_tasks = total_tasks + 1
                 WHERE program_id = ? AND participant_id = ?
                 """,
-                (CURRENT_PROGRAM_ID, participant_id),
+                (context.program_id, participant_id),
             )
-            refresh_progress(conn, participant_id)
+            refresh_progress(conn, context, participant_id)
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def duplicate_program(program_id: int) -> dict:
+def duplicate_program(program_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     with connect_db() as conn:
         source_program = conn.execute(
             "SELECT * FROM programs WHERE id = ? AND organizer_id = ?",
-            (program_id, CURRENT_ORGANIZER_ID),
+            (program_id, context.organizer_id),
         ).fetchone()
         if source_program is None:
             raise ValueError("Программа для копирования не найдена")
@@ -1363,7 +1393,7 @@ def duplicate_program(program_id: int) -> dict:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')
             """,
             (
-                CURRENT_ORGANIZER_ID,
+                context.organizer_id,
                 source_program["id"],
                 new_name,
                 new_slug,
@@ -1415,10 +1445,12 @@ def duplicate_program(program_id: int) -> dict:
                 ),
             )
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def update_branding(payload: dict) -> dict:
+def update_branding(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     brand_name = str(payload.get("brandName", "")).strip()
     primary_color = str(payload.get("primaryColor", "")).strip()
     accent_color = str(payload.get("accentColor", "")).strip()
@@ -1434,13 +1466,15 @@ def update_branding(payload: dict) -> dict:
             SET brand_name = ?, primary_color = ?, accent_color = ?, support_email = ?
             WHERE id = ?
             """,
-            (brand_name, primary_color, accent_color, support_email, CURRENT_ORGANIZER_ID),
+            (brand_name, primary_color, accent_color, support_email, context.organizer_id),
         )
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def create_private_challenge(payload: dict) -> dict:
+def create_private_challenge(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+
     name = str(payload.get("name", "")).strip()
     goal_text = str(payload.get("goalText", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -1462,7 +1496,7 @@ def create_private_challenge(payload: dict) -> dict:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'friends')
             """,
             (
-                CURRENT_PARTICIPANT_ID,
+                context.participant_id,
                 name,
                 description or "Новый приватный челлендж на базе GoalMate.",
                 goal_text,
@@ -1478,20 +1512,24 @@ def create_private_challenge(payload: dict) -> dict:
             INSERT INTO private_challenge_members (challenge_id, participant_id, role, joined_at)
             VALUES (?, ?, 'creator', ?)
             """,
-            (challenge_id, CURRENT_PARTICIPANT_ID, now_iso()),
+            (challenge_id, context.participant_id, now_iso()),
         )
         conn.commit()
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
-def reset_demo() -> dict:
+def reset_demo(context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
     init_db(force_reset=True)
-    return get_bootstrap_state()
+    return get_bootstrap_state(context)
 
 
 class GoalMateHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         return
+
+    def request_context(self) -> RequestContext:
+        return current_request_context(self)
 
     def head_response(self, status: int, content_type: str = "application/json; charset=utf-8", content_length: int = 0) -> None:
         self.send_response(status)
@@ -1540,7 +1578,7 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/api/bootstrap":
-            self.send_json({"ok": True, "data": get_bootstrap_state()})
+            self.send_json({"ok": True, "data": get_bootstrap_state(self.request_context())})
             return
 
         if path == "/":
@@ -1585,41 +1623,42 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            context = self.request_context()
             payload = self.read_json_body()
             if path == "/api/reports":
-                self.send_json({"ok": True, "data": submit_report(payload)})
+                self.send_json({"ok": True, "data": submit_report(payload, context)})
                 return
             if path == "/api/builder/modules":
-                self.send_json({"ok": True, "data": create_module(payload)})
+                self.send_json({"ok": True, "data": create_module(payload, context)})
                 return
             if path == "/api/builder/tasks":
-                self.send_json({"ok": True, "data": create_task(payload)})
+                self.send_json({"ok": True, "data": create_task(payload, context)})
                 return
             if path == "/api/settings/branding":
-                self.send_json({"ok": True, "data": update_branding(payload)})
+                self.send_json({"ok": True, "data": update_branding(payload, context)})
                 return
             if path == "/api/private-challenges":
-                self.send_json({"ok": True, "data": create_private_challenge(payload)})
+                self.send_json({"ok": True, "data": create_private_challenge(payload, context)})
                 return
             if path == "/api/reset-demo":
-                self.send_json({"ok": True, "data": reset_demo()})
+                self.send_json({"ok": True, "data": reset_demo(context)})
                 return
 
             if path.startswith("/api/participant-tasks/") and path.endswith("/complete"):
                 participant_task_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": complete_task(participant_task_id)})
+                self.send_json({"ok": True, "data": complete_task(participant_task_id, context=context)})
                 return
             if path.startswith("/api/participant-tasks/") and path.endswith("/soft-return"):
                 participant_task_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": soft_return_task(participant_task_id)})
+                self.send_json({"ok": True, "data": soft_return_task(participant_task_id, context)})
                 return
             if path.startswith("/api/notifications/") and path.endswith("/read"):
                 notification_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": mark_notification_read(notification_id)})
+                self.send_json({"ok": True, "data": mark_notification_read(notification_id, context)})
                 return
             if path.startswith("/api/programs/") and path.endswith("/duplicate"):
                 program_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": duplicate_program(program_id)})
+                self.send_json({"ok": True, "data": duplicate_program(program_id, context)})
                 return
         except ValueError as error:
             self.send_json({"ok": False, "error": str(error)}, status=400)
@@ -1636,8 +1675,8 @@ class GoalMateHandler(BaseHTTPRequestHandler):
 
 def run() -> None:
     init_db()
-    server = ThreadingHTTPServer((HOST, PORT), GoalMateHandler)
-    print(f"GoalMate is running on http://{HOST}:{PORT}")
+    server = ThreadingHTTPServer((CONFIG.host, CONFIG.port), GoalMateHandler)
+    print(f"GoalMate is running on http://{CONFIG.host}:{CONFIG.port}")
     server.serve_forever()
 
 

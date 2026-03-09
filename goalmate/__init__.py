@@ -1,0 +1,1 @@
+"""GoalMate application package."""
