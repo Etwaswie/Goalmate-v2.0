@@ -58,6 +58,17 @@ DEMO_AUTH_USERS = [
     },
 ]
 
+ROLE_CAPABILITIES = {
+    "mixed": {"participant", "organizer"},
+    "participant": {"participant"},
+    "organizer": {"organizer"},
+    "demo": {"participant", "organizer"},
+}
+
+
+class AuthorizationError(Exception):
+    """Raised when the current context is not allowed to perform an action."""
+
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -318,6 +329,19 @@ def parse_cookies(handler: BaseHTTPRequestHandler | None) -> dict[str, str]:
     return {key: morsel.value for key, morsel in cookie.items()}
 
 
+def available_roles_for_context(context: RequestContext | None) -> list[str]:
+    role = context.role if context is not None else "demo"
+    capabilities = ROLE_CAPABILITIES.get(role, set())
+    ordered_roles = [candidate for candidate in ("participant", "organizer") if candidate in capabilities]
+    return ordered_roles or ["participant"]
+
+
+def require_capability(context: RequestContext, capability: str) -> None:
+    capabilities = ROLE_CAPABILITIES.get(context.role, set())
+    if capability not in capabilities:
+        raise AuthorizationError(f"Роль '{context.role}' не может выполнять действие типа '{capability}'")
+
+
 def resolve_session_context(handler: BaseHTTPRequestHandler | None) -> RequestContext | None:
     cookies = parse_cookies(handler)
     session_token = cookies.get(SESSION_COOKIE_NAME)
@@ -385,10 +409,13 @@ def default_user_context_row(conn: sqlite3.Connection, user_id: int) -> sqlite3.
 
 def get_me_state(context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    available_roles = available_roles_for_context(context)
     me_state = {
         "authenticated": context.is_authenticated,
         "source": context.source,
         "role": context.role,
+        "availableRoles": available_roles,
+        "primaryRole": available_roles[0] if available_roles else "participant",
         "user": None,
         "session": {
             "id": context.session_id,
@@ -1418,6 +1445,7 @@ def touch_participant(conn: sqlite3.Connection, participant_id: int) -> None:
 
 def complete_task(participant_task_id: int, context: RequestContext | None = None, via_report: bool = False) -> dict:
     context = context or current_request_context()
+    require_capability(context, "participant")
 
     with connect_db() as conn:
         record = conn.execute(
@@ -1493,6 +1521,7 @@ def complete_task(participant_task_id: int, context: RequestContext | None = Non
 
 def soft_return_task(participant_task_id: int, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "participant")
 
     with connect_db() as conn:
         record = conn.execute(
@@ -1547,6 +1576,7 @@ def soft_return_task(participant_task_id: int, context: RequestContext | None = 
 
 def submit_report(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "participant")
 
     participant_task_id = int(payload.get("participantTaskId", 0))
     report_type = str(payload.get("reportType", "text")).strip() or "text"
@@ -1610,6 +1640,7 @@ def submit_report(payload: dict, context: RequestContext | None = None) -> dict:
 
 def mark_notification_read(notification_id: int, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "participant")
 
     with connect_db() as conn:
         conn.execute(
@@ -1626,6 +1657,7 @@ def mark_notification_read(notification_id: int, context: RequestContext | None 
 
 def create_module(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "organizer")
 
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -1651,6 +1683,7 @@ def create_module(payload: dict, context: RequestContext | None = None) -> dict:
 
 def create_task(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "organizer")
 
     module_id = int(payload.get("moduleId", 0))
     title = str(payload.get("title", "")).strip()
@@ -1727,6 +1760,7 @@ def create_task(payload: dict, context: RequestContext | None = None) -> dict:
 
 def duplicate_program(program_id: int, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "organizer")
 
     with connect_db() as conn:
         source_program = conn.execute(
@@ -1803,6 +1837,7 @@ def duplicate_program(program_id: int, context: RequestContext | None = None) ->
 
 def update_branding(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "organizer")
 
     brand_name = str(payload.get("brandName", "")).strip()
     primary_color = str(payload.get("primaryColor", "")).strip()
@@ -1827,6 +1862,7 @@ def update_branding(payload: dict, context: RequestContext | None = None) -> dic
 
 def create_private_challenge(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
+    require_capability(context, "participant")
 
     name = str(payload.get("name", "")).strip()
     goal_text = str(payload.get("goalText", "")).strip()
@@ -2032,6 +2068,9 @@ class GoalMateHandler(BaseHTTPRequestHandler):
                 return
         except ValueError as error:
             self.send_json({"ok": False, "error": str(error)}, status=400)
+            return
+        except AuthorizationError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=403)
             return
         except sqlite3.IntegrityError as error:
             self.send_json({"ok": False, "error": f"Ошибка данных: {error}"}, status=400)

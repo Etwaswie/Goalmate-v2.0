@@ -75,8 +75,31 @@ function formatCompactDay(value) {
   }).format(new Date(normalized));
 }
 
+function roleLabel(role) {
+  if (role === "participant") return "Участник";
+  if (role === "organizer") return "Организатор";
+  return "Общий";
+}
+
+function availableRoles() {
+  const roles = state.me?.availableRoles;
+  return Array.isArray(roles) && roles.length ? roles : ["participant", "organizer"];
+}
+
+function canUseRole(role) {
+  return availableRoles().includes(role);
+}
+
+function syncRoleFromAccess() {
+  const roles = availableRoles();
+  if (!roles.includes(state.currentRole)) {
+    state.currentRole = roles[0];
+  }
+}
+
 function allowView(item) {
-  return item.role === "all" || item.role === state.currentRole;
+  if (item.role === "all") return true;
+  return item.role === state.currentRole && canUseRole(item.role);
 }
 
 function showToast(message, isError = false) {
@@ -115,6 +138,7 @@ async function loadState() {
   render();
   try {
     await refreshState();
+    syncRoleFromAccess();
     const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
     if (!allowedCurrentView) {
       state.currentView = "overview";
@@ -136,6 +160,7 @@ async function performRequest(path, payload = null) {
       body: payload ? JSON.stringify(payload) : JSON.stringify({}),
     });
     state.me = await request("/api/me");
+    syncRoleFromAccess();
     closeModal();
   } catch (error) {
     showToast(error.message, true);
@@ -155,6 +180,7 @@ async function performAuthRequest(path, payload = null) {
     });
     state.app = response.bootstrap;
     state.me = response.me;
+    syncRoleFromAccess();
     closeModal();
     return true;
   } catch (error) {
@@ -167,6 +193,10 @@ async function performAuthRequest(path, payload = null) {
 }
 
 function setRole(nextRole) {
+  if (!canUseRole(nextRole)) {
+    showToast(`Текущий аккаунт не имеет доступа к роли "${roleLabel(nextRole)}"`, true);
+    return;
+  }
   state.currentRole = nextRole;
   const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
   if (!allowedCurrentView) {
@@ -205,7 +235,7 @@ function renderNav() {
         <button class="nav-button ${item.id === state.currentView ? "active" : ""}" type="button" data-view="${item.id}">
           <span class="nav-label">
             <strong>${escapeHtml(item.label)}</strong>
-            <span class="nav-role">${item.role === "all" ? "Общий экран" : item.role === "participant" ? "Участник" : "Организатор"}</span>
+            <span class="nav-role">${item.role === "all" ? "Общий экран" : roleLabel(item.role)}</span>
           </span>
           <span>→</span>
         </button>
@@ -215,10 +245,23 @@ function renderNav() {
 }
 
 function renderRoleSwitch() {
-  roleSwitchRoot.innerHTML = `
-    <button class="role-button ${state.currentRole === "participant" ? "active" : ""}" type="button" data-role="participant">Роль: участник</button>
-    <button class="role-button ${state.currentRole === "organizer" ? "active" : ""}" type="button" data-role="organizer">Роль: организатор</button>
-  `;
+  const roles = availableRoles();
+  if (roles.length <= 1) {
+    roleSwitchRoot.innerHTML = `
+      <span class="role-button active">Роль: ${escapeHtml(roleLabel(roles[0] || "participant"))}</span>
+    `;
+    return;
+  }
+
+  roleSwitchRoot.innerHTML = roles
+    .map(
+      (role) => `
+        <button class="role-button ${state.currentRole === role ? "active" : ""}" type="button" data-role="${role}">
+          Роль: ${escapeHtml(roleLabel(role).toLowerCase())}
+        </button>
+      `
+    )
+    .join("");
 }
 
 function renderAuthPanel() {
@@ -378,6 +421,8 @@ function renderHero() {
 
 function renderOverview() {
   const { participantBoard, notifications, organizerDashboard, privateChallenges, participant } = state.app;
+  const hasParticipantAccess = canUseRole("participant");
+  const hasOrganizerAccess = canUseRole("organizer");
   const previewTasks = participantBoard.tasks.slice(0, 4).map(renderTaskCard).join("");
   const previewNotifications = notifications.slice(0, 3).map(renderNotificationCard).join("");
   const challenges = privateChallenges
@@ -408,12 +453,16 @@ function renderOverview() {
       <div class="panel">
         <div class="table-toolbar">
           <div>
-            <div class="eyebrow">Основной сценарий участника</div>
-            <h3>Текущая неделя без перегруза</h3>
+            <div class="eyebrow">${hasParticipantAccess ? "Основной сценарий участника" : "Participant layer hidden"}</div>
+            <h3>${hasParticipantAccess ? "Текущая неделя без перегруза" : "Этот аккаунт не работает в participant-режиме"}</h3>
           </div>
-          <button class="secondary-button" type="button" data-view="tasks">Открыть все задачи</button>
+          ${hasParticipantAccess ? '<button class="secondary-button" type="button" data-view="tasks">Открыть все задачи</button>' : ""}
         </div>
-        <div class="task-grid" style="margin-top:18px">${previewTasks}</div>
+        ${
+          hasParticipantAccess
+            ? `<div class="task-grid" style="margin-top:18px">${previewTasks}</div>`
+            : '<div class="empty-card" style="margin-top:18px">Залогинься под mixed или participant demo-аккаунтом, чтобы тестировать задачи, отчёты и мягкий возврат.</div>'
+        }
       </div>
       <div class="share-card">
         <div class="eyebrow">Виральный артефакт</div>
@@ -432,38 +481,48 @@ function renderOverview() {
       <div class="panel">
         <div class="table-toolbar">
           <div>
-            <div class="eyebrow">B2B dashboard</div>
-            <h3>Что видит организатор прямо сейчас</h3>
+            <div class="eyebrow">${hasOrganizerAccess ? "B2B dashboard" : "Organizer layer hidden"}</div>
+            <h3>${hasOrganizerAccess ? "Что видит организатор прямо сейчас" : "Этот аккаунт не работает в organizer-режиме"}</h3>
           </div>
-          <button class="secondary-button" type="button" data-view="organizer">Открыть экран организатора</button>
+          ${hasOrganizerAccess ? '<button class="secondary-button" type="button" data-view="organizer">Открыть экран организатора</button>' : ""}
         </div>
-        <div class="kpi-grid" style="margin-top:18px">
-          <div class="kpi">
-            <div class="eyebrow">Участники</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.totalParticipants)}</div>
-            <div class="kpi-caption">в активном потоке</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Доходимость</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.completionRate)}%</div>
-            <div class="kpi-caption">текущий средний прогресс</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Риск оттока</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.atRiskCount)}</div>
-            <div class="kpi-caption">нужны nudges</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Отчёты сегодня</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.reportsToday)}</div>
-            <div class="kpi-caption">уже принято системой</div>
-          </div>
-        </div>
+        ${
+          hasOrganizerAccess
+            ? `
+              <div class="kpi-grid" style="margin-top:18px">
+                <div class="kpi">
+                  <div class="eyebrow">Участники</div>
+                  <div class="kpi-value">${escapeHtml(organizerDashboard.totalParticipants)}</div>
+                  <div class="kpi-caption">в активном потоке</div>
+                </div>
+                <div class="kpi">
+                  <div class="eyebrow">Доходимость</div>
+                  <div class="kpi-value">${escapeHtml(organizerDashboard.completionRate)}%</div>
+                  <div class="kpi-caption">текущий средний прогресс</div>
+                </div>
+                <div class="kpi">
+                  <div class="eyebrow">Риск оттока</div>
+                  <div class="kpi-value">${escapeHtml(organizerDashboard.atRiskCount)}</div>
+                  <div class="kpi-caption">нужны nudges</div>
+                </div>
+                <div class="kpi">
+                  <div class="eyebrow">Отчёты сегодня</div>
+                  <div class="kpi-value">${escapeHtml(organizerDashboard.reportsToday)}</div>
+                  <div class="kpi-caption">уже принято системой</div>
+                </div>
+              </div>
+            `
+            : '<div class="empty-card" style="margin-top:18px">Залогинься под mixed или organizer demo-аккаунтом, чтобы работать с конструктором, аналитикой и B2B dashboard.</div>'
+        }
       </div>
       <div class="panel">
-        <div class="eyebrow">Контекстные уведомления</div>
-        <h3>Smart nudges вместо обычных пушей</h3>
-        <div class="notification-stack" style="margin-top:18px">${previewNotifications}</div>
+        <div class="eyebrow">${hasParticipantAccess ? "Контекстные уведомления" : "Nudges preview"}</div>
+        <h3>${hasParticipantAccess ? "Smart nudges вместо обычных пушей" : "Participant nudges скрыты для текущего аккаунта"}</h3>
+        ${
+          hasParticipantAccess
+            ? `<div class="notification-stack" style="margin-top:18px">${previewNotifications}</div>`
+            : '<div class="empty-card" style="margin-top:18px">У participant-аккаунта здесь появятся мягкие возвраты, командные nudges и напоминания по заданиям.</div>'
+        }
       </div>
     </section>
 
@@ -1016,42 +1075,55 @@ function renderAnalyticsView() {
 
 function renderChallengesView() {
   const { privateChallenges, participant } = state.app;
+  const hasParticipantAccess = canUseRole("participant");
   return `
     ${renderHero()}
     <section class="challenge-grid">
-      <div class="form-card">
-        <div class="eyebrow">B2C сценарий</div>
-        <h3>Создать приватный челлендж с друзьями</h3>
-        <form id="challenge-form">
-          <div class="form-grid">
-            <label>
-              Название
-              <input name="name" placeholder="Например: Утренний бег без срывов" required />
-            </label>
-            <label>
-              Цель
-              <input name="goalText" placeholder="4 пробежки в неделю" required />
-            </label>
-            <label>
-              Шагов в неделю
-              <input name="targetPerWeek" type="number" value="4" min="1" required />
-            </label>
-            <label>
-              Размер команды
-              <input name="targetTeamSize" type="number" value="4" min="2" max="7" required />
-            </label>
-            <label>
-              Длительность, недели
-              <input name="durationWeeks" type="number" value="3" min="1" required />
-            </label>
-          </div>
-          <label>
-            Контекст
-            <textarea name="description" placeholder="Коротко опиши механику для друзей."></textarea>
-          </label>
-          <button class="primary-button" type="submit">Создать челлендж</button>
-        </form>
-      </div>
+      ${
+        hasParticipantAccess
+          ? `
+            <div class="form-card">
+              <div class="eyebrow">B2C сценарий</div>
+              <h3>Создать приватный челлендж с друзьями</h3>
+              <form id="challenge-form">
+                <div class="form-grid">
+                  <label>
+                    Название
+                    <input name="name" placeholder="Например: Утренний бег без срывов" required />
+                  </label>
+                  <label>
+                    Цель
+                    <input name="goalText" placeholder="4 пробежки в неделю" required />
+                  </label>
+                  <label>
+                    Шагов в неделю
+                    <input name="targetPerWeek" type="number" value="4" min="1" required />
+                  </label>
+                  <label>
+                    Размер команды
+                    <input name="targetTeamSize" type="number" value="4" min="2" max="7" required />
+                  </label>
+                  <label>
+                    Длительность, недели
+                    <input name="durationWeeks" type="number" value="3" min="1" required />
+                  </label>
+                </div>
+                <label>
+                  Контекст
+                  <textarea name="description" placeholder="Коротко опиши механику для друзей."></textarea>
+                </label>
+                <button class="primary-button" type="submit">Создать челлендж</button>
+              </form>
+            </div>
+          `
+          : `
+            <div class="form-card">
+              <div class="eyebrow">B2C сценарий</div>
+              <h3>Создание челленджей доступно только participant-роли</h3>
+              <p class="subtle">Organizer demo-аккаунт может смотреть структуру growth-loop, но не создавать приватные челленджи через этот endpoint.</p>
+            </div>
+          `
+      }
 
       <div class="share-card">
         <div class="eyebrow">Почему это работает</div>
