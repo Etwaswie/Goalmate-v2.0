@@ -187,6 +187,30 @@ textarea {
   box-shadow: var(--shadow);
 }
 
+.auth-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: var(--shadow);
+}
+
+.auth-panel-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.auth-panel-copy strong {
+  font-size: 0.94rem;
+}
+
+.auth-panel-copy span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .role-button {
   padding: 10px 14px;
   border: 0;

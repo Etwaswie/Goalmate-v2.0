@@ -18,6 +18,14 @@ python3 app.py
 http://127.0.0.1:8000
 ```
 
+## Demo Auth
+
+В development-режиме приложение по-прежнему работает через `development fallback`, даже если ты не логинился. Но теперь в локальной базе уже есть настоящие demo-пользователи и cookie-сессии:
+
+- `demo@goalmate.local` / `goalmate-demo`
+- `participant@goalmate.local` / `goalmate-participant`
+- `organizer@goalmate.local` / `goalmate-organizer`
+
 ## Хранение данных
 
 - локальная база: `data/goalmate.db`

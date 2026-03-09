@@ -12,6 +12,11 @@ class RequestContext:
     program_id: int
     participant_id: int
     source: str
+    user_id: int | None = None
+    session_id: int | None = None
+    session_expires_at: str | None = None
+    role: str = "demo"
+    is_authenticated: bool = False
 
 
 def get_request_context(config: AppConfig, handler: BaseHTTPRequestHandler | None = None) -> RequestContext:
@@ -22,4 +27,5 @@ def get_request_context(config: AppConfig, handler: BaseHTTPRequestHandler | Non
         program_id=config.dev_program_id,
         participant_id=config.dev_participant_id,
         source="development-fallback",
+        role="mixed",
     )

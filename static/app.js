@@ -11,6 +11,7 @@ const navItems = [
 
 const state = {
   app: null,
+  me: null,
   currentRole: "participant",
   currentView: "overview",
   modal: null,
@@ -26,6 +27,7 @@ const modal = document.getElementById("modal");
 const modalCard = document.getElementById("modal-card");
 const toast = document.getElementById("toast");
 const resetDemoButton = document.getElementById("reset-demo-button");
+const authPanelRoot = document.getElementById("auth-panel");
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -102,11 +104,17 @@ async function request(path, options = {}) {
   return payload.data;
 }
 
+async function refreshState() {
+  const [app, me] = await Promise.all([request("/api/bootstrap"), request("/api/me")]);
+  state.app = app;
+  state.me = me;
+}
+
 async function loadState() {
   state.busy = true;
   render();
   try {
-    state.app = await request("/api/bootstrap");
+    await refreshState();
     const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
     if (!allowedCurrentView) {
       state.currentView = "overview";
@@ -127,9 +135,31 @@ async function performRequest(path, payload = null) {
       method: "POST",
       body: payload ? JSON.stringify(payload) : JSON.stringify({}),
     });
+    state.me = await request("/api/me");
     closeModal();
   } catch (error) {
     showToast(error.message, true);
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function performAuthRequest(path, payload = null) {
+  state.busy = true;
+  render();
+  try {
+    const response = await request(path, {
+      method: "POST",
+      body: payload ? JSON.stringify(payload) : JSON.stringify({}),
+    });
+    state.app = response.bootstrap;
+    state.me = response.me;
+    closeModal();
+    return true;
+  } catch (error) {
+    showToast(error.message, true);
+    return false;
   } finally {
     state.busy = false;
     render();
@@ -154,6 +184,11 @@ function openReportModal(taskId) {
   const task = state.app?.participantBoard?.tasks?.find((item) => item.participant_task_id === taskId);
   if (!task) return;
   state.modal = { type: "report", taskId };
+  renderModal();
+}
+
+function openLoginModal() {
+  state.modal = { type: "login" };
   renderModal();
 }
 
@@ -183,6 +218,36 @@ function renderRoleSwitch() {
   roleSwitchRoot.innerHTML = `
     <button class="role-button ${state.currentRole === "participant" ? "active" : ""}" type="button" data-role="participant">Роль: участник</button>
     <button class="role-button ${state.currentRole === "organizer" ? "active" : ""}" type="button" data-role="organizer">Роль: организатор</button>
+  `;
+}
+
+function renderAuthPanel() {
+  if (!state.me) {
+    authPanelRoot.innerHTML = "";
+    return;
+  }
+
+  authPanelRoot.className = "auth-panel";
+  const title = state.me.authenticated
+    ? state.me.user?.fullName || state.me.user?.email || "Аккаунт"
+    : "Auth foundation";
+  const subtitle = state.me.authenticated
+    ? `${state.me.user?.email || ""} • ${state.me.source}`
+    : "dev fallback active";
+  const badge = state.me.authenticated
+    ? `<span class="badge success">session</span>`
+    : `<span class="badge info">fallback</span>`;
+  const action = state.me.authenticated
+    ? `<button class="inline-button" type="button" data-action="logout">Выйти</button>`
+    : `<button class="inline-button" type="button" data-action="open-login">Demo login</button>`;
+
+  authPanelRoot.innerHTML = `
+    ${badge}
+    <div class="auth-panel-copy">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(subtitle)}</span>
+    </div>
+    ${action}
   `;
 }
 
@@ -1099,15 +1164,65 @@ function renderModal() {
     `;
   }
 
+  if (state.modal.type === "login") {
+    const recommended = state.me?.demoCredentials?.[0] || {
+      email: "demo@goalmate.local",
+      password: "goalmate-demo",
+      role: "mixed",
+    };
+    const credentialRows = (state.me?.demoCredentials || [])
+      .map(
+        (item) => `
+          <div class="list-box">
+            <div class="task-head">
+              <strong>${escapeHtml(item.email)}</strong>
+              <span class="badge neutral">${escapeHtml(item.role)}</span>
+            </div>
+            <p class="subtle">Пароль: <code>${escapeHtml(item.password)}</code></p>
+          </div>
+        `
+      )
+      .join("");
+
+    modalCard.innerHTML = `
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Auth foundation</div>
+          <h3>Создать demo-сессию</h3>
+        </div>
+        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
+      </div>
+      <p class="subtle">Реальная auth уже заведена в локальной базе, но development fallback всё ещё активен. Ниже можно создать настоящую cookie-сессию и проверить следующий слой архитектуры.</p>
+      <form id="login-form" style="margin-top:18px">
+        <div class="form-grid">
+          <label>
+            Email
+            <input name="email" value="${escapeHtml(recommended.email)}" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" value="${escapeHtml(recommended.password)}" required />
+          </label>
+        </div>
+        <button class="primary-button" type="submit">Войти</button>
+      </form>
+      <div class="list-stack" style="margin-top:18px">
+        ${credentialRows}
+      </div>
+    `;
+  }
+
   modal.classList.remove("hidden");
 }
 
 function render() {
   renderNav();
   renderRoleSwitch();
+  renderAuthPanel();
   if (state.app) {
     topbarTitle.textContent = state.currentRole === "participant" ? "GoalMate: участник" : "GoalMate: организатор";
-    topbarLabel.textContent = `${state.app.program.brand_name} • ${state.currentRole === "participant" ? "participant demo" : "operator demo"}`;
+    const authMode = state.me?.authenticated ? "session" : state.app.meta.contextSource;
+    topbarLabel.textContent = `${state.app.program.brand_name} • ${state.currentRole === "participant" ? "participant demo" : "operator demo"} • ${authMode}`;
   }
 
   viewRoot.innerHTML = renderCurrentView();
@@ -1157,6 +1272,19 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "open-login") {
+    openLoginModal();
+    return;
+  }
+
+  if (action === "logout") {
+    const ok = await performAuthRequest("/api/auth/logout");
+    if (ok) {
+      showToast("Сессия завершена, включился development fallback");
+    }
+    return;
+  }
+
   if (action === "notification-read") {
     await performRequest(`/api/notifications/${id}/read`);
     showToast("Уведомление помечено прочитанным");
@@ -1181,6 +1309,14 @@ document.addEventListener("submit", async (event) => {
     payload.participantTaskId = Number(payload.participantTaskId);
     await performRequest("/api/reports", payload);
     showToast("Отчёт отправлен и прогресс обновлён");
+    return;
+  }
+
+  if (form.id === "login-form") {
+    const ok = await performAuthRequest("/api/auth/login", payload);
+    if (ok) {
+      showToast("Demo-сессия создана");
+    }
     return;
   }
 

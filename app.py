@@ -4,10 +4,20 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from goalmate.auth import (
+    SESSION_COOKIE_NAME,
+    build_session_cookie,
+    generate_session_token,
+    hash_password,
+    hash_session_token,
+    session_expiry_iso,
+    verify_password,
+)
 from goalmate.config import load_config
 from goalmate.context import RequestContext, get_request_context
 
@@ -17,6 +27,36 @@ CONFIG = load_config(ROOT_DIR)
 STATIC_DIR = CONFIG.static_dir
 DATA_DIR = CONFIG.data_dir
 DB_PATH = CONFIG.db_path
+
+DEMO_AUTH_USERS = [
+    {
+        "id": 1,
+        "email": "demo@goalmate.local",
+        "password": "goalmate-demo",
+        "full_name": "GoalMate Demo Admin",
+        "user_type": "mixed",
+        "role": "mixed",
+        "is_default": 1,
+    },
+    {
+        "id": 2,
+        "email": "participant@goalmate.local",
+        "password": "goalmate-participant",
+        "full_name": "GoalMate Demo Participant",
+        "user_type": "participant",
+        "role": "participant",
+        "is_default": 0,
+    },
+    {
+        "id": 3,
+        "email": "organizer@goalmate.local",
+        "password": "goalmate-organizer",
+        "full_name": "GoalMate Demo Organizer",
+        "user_type": "organizer",
+        "role": "organizer",
+        "is_default": 0,
+    },
+]
 
 
 SCHEMA_SQL = """
@@ -46,6 +86,46 @@ CREATE TABLE IF NOT EXISTS programs (
     status TEXT NOT NULL,
     FOREIGN KEY (organizer_id) REFERENCES organizers(id),
     FOREIGN KEY (source_program_id) REFERENCES programs(id)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    user_type TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_contexts (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    organizer_id INTEGER NOT NULL,
+    program_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (organizer_id) REFERENCES organizers(id) ON DELETE CASCADE,
+    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+    UNIQUE (user_id, organizer_id, program_id, participant_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    user_context_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    user_agent TEXT,
+    ip_address TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_context_id) REFERENCES user_contexts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS modules (
@@ -212,6 +292,9 @@ def now_iso() -> str:
 
 
 def current_request_context(handler: BaseHTTPRequestHandler | None = None) -> RequestContext:
+    session_context = resolve_session_context(handler)
+    if session_context is not None:
+        return session_context
     return get_request_context(CONFIG, handler)
 
 
@@ -220,6 +303,229 @@ def connect_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def parse_cookies(handler: BaseHTTPRequestHandler | None) -> dict[str, str]:
+    if handler is None:
+        return {}
+
+    raw_cookie = handler.headers.get("Cookie", "")
+    if not raw_cookie:
+        return {}
+
+    cookie = SimpleCookie()
+    cookie.load(raw_cookie)
+    return {key: morsel.value for key, morsel in cookie.items()}
+
+
+def resolve_session_context(handler: BaseHTTPRequestHandler | None) -> RequestContext | None:
+    cookies = parse_cookies(handler)
+    session_token = cookies.get(SESSION_COOKIE_NAME)
+    if not session_token:
+        return None
+
+    session_token_hash = hash_session_token(session_token, CONFIG.session_secret)
+    with connect_db() as conn:
+        session_row = conn.execute(
+            """
+            SELECT
+                s.id AS session_id,
+                s.user_id,
+                s.user_context_id,
+                s.expires_at,
+                uc.organizer_id,
+                uc.program_id,
+                uc.participant_id,
+                uc.role,
+                u.email,
+                u.full_name
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            JOIN user_contexts uc ON uc.id = s.user_context_id
+            WHERE s.token_hash = ?
+              AND s.expires_at > ?
+              AND u.is_active = 1
+            """,
+            (session_token_hash, now_iso()),
+        ).fetchone()
+        if session_row is None:
+            return None
+
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+            (now_iso(), session_row["session_id"]),
+        )
+        conn.commit()
+
+    return RequestContext(
+        organizer_id=session_row["organizer_id"],
+        program_id=session_row["program_id"],
+        participant_id=session_row["participant_id"],
+        source="session",
+        user_id=session_row["user_id"],
+        session_id=session_row["session_id"],
+        session_expires_at=session_row["expires_at"],
+        role=session_row["role"],
+        is_authenticated=True,
+    )
+
+
+def default_user_context_row(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM user_contexts
+        WHERE user_id = ?
+        ORDER BY is_default DESC, id ASC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def get_me_state(context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    me_state = {
+        "authenticated": context.is_authenticated,
+        "source": context.source,
+        "role": context.role,
+        "user": None,
+        "session": {
+            "id": context.session_id,
+            "expiresAt": context.session_expires_at,
+        }
+        if context.is_authenticated
+        else None,
+        "demoCredentials": [
+            {
+                "email": demo_user["email"],
+                "password": demo_user["password"],
+                "role": demo_user["role"],
+            }
+            for demo_user in DEMO_AUTH_USERS
+        ]
+        if CONFIG.is_development
+        else [],
+    }
+
+    if context.user_id is not None:
+        with connect_db() as conn:
+            user = conn.execute(
+                "SELECT id, email, full_name, user_type, last_login_at FROM users WHERE id = ?",
+                (context.user_id,),
+            ).fetchone()
+        if user is not None:
+            me_state["user"] = {
+                "id": user["id"],
+                "email": user["email"],
+                "fullName": user["full_name"],
+                "userType": user["user_type"],
+                "lastLoginAt": user["last_login_at"],
+            }
+
+    return me_state
+
+
+def login_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> tuple[dict, str]:
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
+    if not email or not password:
+        raise ValueError("Нужны email и пароль")
+
+    user_agent = handler.headers.get("User-Agent", "") if handler is not None else ""
+    ip_address = handler.client_address[0] if handler is not None and handler.client_address else ""
+
+    with connect_db() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE lower(email) = ? AND is_active = 1",
+            (email,),
+        ).fetchone()
+        if user is None or not verify_password(password, user["password_hash"]):
+            raise ValueError("Неверный email или пароль")
+
+        user_context = default_user_context_row(conn, user["id"])
+        if user_context is None:
+            raise ValueError("Для этого пользователя не найден доступ к GoalMate")
+
+        token = generate_session_token()
+        token_hash = hash_session_token(token, CONFIG.session_secret)
+        expires_at = session_expiry_iso()
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                user_id, user_context_id, token_hash, created_at, expires_at, last_seen_at, user_agent, ip_address
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user["id"],
+                user_context["id"],
+                token_hash,
+                now_iso(),
+                expires_at,
+                now_iso(),
+                user_agent,
+                ip_address,
+            ),
+        )
+        conn.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?",
+            (now_iso(), user["id"]),
+        )
+        conn.commit()
+
+    if handler is not None:
+        context = resolve_session_context_from_token(token)
+    else:
+        context = current_request_context()
+
+    return {"me": get_me_state(context), "bootstrap": get_bootstrap_state(context)}, build_session_cookie(token)
+
+
+def resolve_session_context_from_token(session_token: str) -> RequestContext | None:
+    session_token_hash = hash_session_token(session_token, CONFIG.session_secret)
+    with connect_db() as conn:
+        session_row = conn.execute(
+            """
+            SELECT
+                s.id AS session_id,
+                s.user_id,
+                s.user_context_id,
+                s.expires_at,
+                uc.organizer_id,
+                uc.program_id,
+                uc.participant_id,
+                uc.role
+            FROM sessions s
+            JOIN user_contexts uc ON uc.id = s.user_context_id
+            WHERE s.token_hash = ?
+              AND s.expires_at > ?
+            """,
+            (session_token_hash, now_iso()),
+        ).fetchone()
+        if session_row is None:
+            return None
+    return RequestContext(
+        organizer_id=session_row["organizer_id"],
+        program_id=session_row["program_id"],
+        participant_id=session_row["participant_id"],
+        source="session",
+        user_id=session_row["user_id"],
+        session_id=session_row["session_id"],
+        session_expires_at=session_row["expires_at"],
+        role=session_row["role"],
+        is_authenticated=True,
+    )
+
+
+def logout_user(context: RequestContext | None = None) -> tuple[dict, str]:
+    context = context or current_request_context()
+    if context.session_id is not None:
+        with connect_db() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = ?", (context.session_id,))
+            conn.commit()
+
+    fallback_context = get_request_context(CONFIG)
+    return {"me": get_me_state(fallback_context), "bootstrap": get_bootstrap_state(fallback_context)}, build_session_cookie("", clear=True)
 
 
 def init_db(force_reset: bool = False) -> None:
@@ -232,7 +538,53 @@ def init_db(force_reset: bool = False) -> None:
         has_data = conn.execute("SELECT COUNT(*) AS count FROM organizers").fetchone()["count"]
         if not has_data:
             seed_demo(conn)
-            conn.commit()
+        ensure_demo_auth_seed(conn)
+        conn.commit()
+
+
+def ensure_demo_auth_seed(conn: sqlite3.Connection, created_at: str | None = None) -> None:
+    created_at = created_at or now_iso()
+    users = [
+        (
+            demo_user["id"],
+            demo_user["email"],
+            hash_password(demo_user["password"]),
+            demo_user["full_name"],
+            demo_user["user_type"],
+            1,
+            created_at,
+            None,
+        )
+        for demo_user in DEMO_AUTH_USERS
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO users (id, email, password_hash, full_name, user_type, is_active, created_at, last_login_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        users,
+    )
+
+    user_contexts = [
+        (
+            index,
+            demo_user["id"],
+            CONFIG.dev_organizer_id,
+            CONFIG.dev_program_id,
+            CONFIG.dev_participant_id,
+            demo_user["role"],
+            demo_user["is_default"],
+        )
+        for index, demo_user in enumerate(DEMO_AUTH_USERS, start=1)
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO user_contexts (
+            id, user_id, organizer_id, program_id, participant_id, role, is_default
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        user_contexts,
+    )
 
 
 def seed_demo(conn: sqlite3.Connection) -> None:
@@ -475,6 +827,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         """,
         participants,
     )
+    ensure_demo_auth_seed(conn, current_time)
 
     enrollments = [
         (1, 1, 1, "participant", 75.0, 1250, 3, 4, 1, 0, joined_at),
@@ -1537,9 +1890,11 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(content_length))
         self.end_headers()
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
+    def send_json(self, payload: dict, status: int = 200, extra_headers: list[tuple[str, str]] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        for header_name, header_value in extra_headers or []:
+            self.send_header(header_name, header_value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1580,6 +1935,9 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         if path == "/api/bootstrap":
             self.send_json({"ok": True, "data": get_bootstrap_state(self.request_context())})
             return
+        if path == "/api/me":
+            self.send_json({"ok": True, "data": get_me_state(self.request_context())})
+            return
 
         if path == "/":
             self.serve_static(STATIC_DIR / "index.html")
@@ -1600,6 +1958,10 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/api/bootstrap":
+            body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
+            self.head_response(HTTPStatus.OK, "application/json; charset=utf-8", len(body))
+            return
+        if path == "/api/me":
             body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
             self.head_response(HTTPStatus.OK, "application/json; charset=utf-8", len(body))
             return
@@ -1625,6 +1987,14 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         try:
             context = self.request_context()
             payload = self.read_json_body()
+            if path == "/api/auth/login":
+                auth_payload, session_cookie = login_user(payload, self)
+                self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
+            if path == "/api/auth/logout":
+                auth_payload, session_cookie = logout_user(context)
+                self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
             if path == "/api/reports":
                 self.send_json({"ok": True, "data": submit_report(payload, context)})
                 return
