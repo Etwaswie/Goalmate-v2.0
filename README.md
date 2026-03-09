@@ -9,6 +9,7 @@
 ## Запуск
 
 ```bash
+python3 -m pip install -r requirements.txt
 python3 app.py
 ```
 
@@ -31,6 +32,15 @@ http://127.0.0.1:8000
 - локальная база: `data/goalmate.db`
 - статика: `static/`
 - сервер: `app.py`
+
+## База данных
+
+По умолчанию GoalMate работает на `SQLite`.
+
+- локальный fallback: `DATABASE_URL=` пустой, используется `DATABASE_PATH`
+- целевой online-режим: `DATABASE_URL=postgresql://...`
+
+Сейчас `db`-слой уже распознаёт `PostgreSQL` и использует `psycopg`, но staging-переезд имеет смысл делать только после отдельной проверки с реальной Postgres-базой.
 
 ## Сброс демо
 

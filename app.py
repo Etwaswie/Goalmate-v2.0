@@ -20,7 +20,13 @@ from goalmate.auth import (
 )
 from goalmate.config import load_config
 from goalmate.context import RequestContext, get_request_context
-from goalmate.db import build_database_settings, connect_database, ensure_sqlite_data_dir
+from goalmate.db import (
+    build_database_settings,
+    connect_database,
+    ensure_sqlite_data_dir,
+    reset_database,
+    sync_identity_sequences,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -1223,23 +1229,20 @@ def switch_session_scope(payload: dict, context: RequestContext | None = None) -
 
 
 def init_db(force_reset: bool = False) -> None:
-    if not DB_SETTINGS.is_sqlite:
-        raise RuntimeError(
-            "GoalMate сейчас умеет запускаться только на SQLite runtime. "
-            "PostgreSQL backend уже распознан конфигом, но адаптер будет подключен в следующей итерации."
-        )
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ensure_sqlite_data_dir(DB_SETTINGS)
-    if force_reset and DB_PATH.exists():
+    if force_reset and DB_SETTINGS.is_sqlite and DB_PATH.exists():
         DB_PATH.unlink()
 
     with connect_db() as conn:
+        if force_reset and not DB_SETTINGS.is_sqlite:
+            reset_database(DB_SETTINGS, conn)
         conn.executescript(SCHEMA_SQL)
         has_data = conn.execute("SELECT COUNT(*) AS count FROM organizers").fetchone()["count"]
         if not has_data:
             seed_demo(conn)
         ensure_demo_auth_seed(conn)
+        sync_identity_sequences(DB_SETTINGS, conn)
         conn.commit()
 
 
@@ -2630,6 +2633,8 @@ def create_private_challenge(payload: dict, context: RequestContext | None = Non
 
 
 def reset_demo(context: RequestContext | None = None) -> dict:
+    if not CONFIG.is_development:
+        raise AuthorizationError("Сброс демо доступен только в development-режиме")
     context = context or current_request_context()
     init_db(force_reset=True)
     return get_bootstrap_state(context)

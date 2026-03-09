@@ -1353,6 +1353,7 @@ function render() {
   viewRoot.innerHTML = renderCurrentView();
   renderModal();
   resetDemoButton.disabled = state.busy;
+  resetDemoButton.hidden = state.app?.meta?.appEnv !== "development";
 }
 
 document.addEventListener("click", async (event) => {
