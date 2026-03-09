@@ -65,6 +65,10 @@ ROLE_CAPABILITIES = {
     "demo": {"participant", "organizer"},
 }
 
+ORGANIZER_MEMBERSHIP_ROLES = {"owner", "admin", "curator"}
+PROGRAM_ORGANIZER_MEMBERSHIP_ROLES = {"organizer", "curator"}
+PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES = {"participant"}
+
 
 class AuthorizationError(Exception):
     """Raised when the current context is not allowed to perform an action."""
@@ -139,6 +143,32 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (user_context_id) REFERENCES user_contexts(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS session_scopes (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL UNIQUE,
+    organizer_id INTEGER NOT NULL,
+    program_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (organizer_id) REFERENCES organizers(id) ON DELETE CASCADE,
+    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS organization_memberships (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    organizer_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (organizer_id) REFERENCES organizers(id) ON DELETE CASCADE,
+    UNIQUE (user_id, organizer_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS modules (
     id INTEGER PRIMARY KEY,
     program_id INTEGER NOT NULL,
@@ -175,6 +205,20 @@ CREATE TABLE IF NOT EXISTS participants (
     avatar_bg TEXT NOT NULL,
     streak_days INTEGER NOT NULL DEFAULT 0,
     last_active_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS program_memberships (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    program_id INTEGER NOT NULL,
+    participant_id INTEGER,
+    role TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE SET NULL,
+    UNIQUE (user_id, program_id, participant_id, role)
 );
 
 CREATE TABLE IF NOT EXISTS enrollments (
@@ -329,15 +373,452 @@ def parse_cookies(handler: BaseHTTPRequestHandler | None) -> dict[str, str]:
     return {key: morsel.value for key, morsel in cookie.items()}
 
 
+def ordered_available_roles(roles: set[str] | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    unique_roles = {role for role in roles if role in {"participant", "organizer"}}
+    return tuple(candidate for candidate in ("participant", "organizer") if candidate in unique_roles)
+
+
+def primary_role_from_available_roles(available_roles: tuple[str, ...] | list[str]) -> str:
+    normalized = ordered_available_roles(tuple(available_roles))
+    if len(normalized) == 2:
+        return "mixed"
+    if normalized:
+        return normalized[0]
+    return "demo"
+
+
+def list_user_memberships(conn: sqlite3.Connection, user_id: int) -> dict[str, list[dict]]:
+    organization_rows = conn.execute(
+        """
+        SELECT
+            om.id,
+            om.organizer_id,
+            om.role,
+            om.is_default,
+            om.created_at,
+            o.name AS organizer_name,
+            o.brand_name
+        FROM organization_memberships om
+        JOIN organizers o ON o.id = om.organizer_id
+        WHERE om.user_id = ?
+        ORDER BY om.is_default DESC, om.id ASC
+        """,
+        (user_id,),
+    ).fetchall()
+    program_rows = conn.execute(
+        """
+        SELECT
+            pm.id,
+            p.organizer_id,
+            pm.program_id,
+            pm.participant_id,
+            pm.role,
+            pm.is_default,
+            pm.created_at,
+            p.name AS program_name,
+            p.status AS program_status,
+            pt.full_name AS participant_name
+        FROM program_memberships pm
+        JOIN programs p ON p.id = pm.program_id
+        LEFT JOIN participants pt ON pt.id = pm.participant_id
+        WHERE pm.user_id = ?
+        ORDER BY pm.is_default DESC, pm.id ASC
+        """,
+        (user_id,),
+    ).fetchall()
+    return {
+        "organizations": [{key: row[key] for key in row.keys()} for row in organization_rows],
+        "programs": [{key: row[key] for key in row.keys()} for row in program_rows],
+    }
+
+
+def default_program_row_for_organizer(conn: sqlite3.Connection, organizer_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, organizer_id, status
+        FROM programs
+        WHERE organizer_id = ?
+        ORDER BY
+            CASE status
+                WHEN 'active' THEN 1
+                WHEN 'draft' THEN 2
+                WHEN 'archived' THEN 3
+                ELSE 4
+            END,
+            id ASC
+        LIMIT 1
+        """,
+        (organizer_id,),
+    ).fetchone()
+
+
+def default_preview_participant_id(conn: sqlite3.Connection, program_id: int) -> int | None:
+    preferred = conn.execute(
+        """
+        SELECT participant_id
+        FROM enrollments
+        WHERE program_id = ? AND participant_id = ?
+        """,
+        (program_id, CONFIG.dev_participant_id),
+    ).fetchone()
+    if preferred is not None:
+        return int(preferred["participant_id"])
+
+    row = conn.execute(
+        """
+        SELECT participant_id
+        FROM enrollments
+        WHERE program_id = ?
+        ORDER BY participant_id ASC
+        LIMIT 1
+        """,
+        (program_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row["participant_id"])
+
+
+def available_roles_from_memberships(
+    memberships: dict[str, list[dict]],
+    organizer_id: int,
+    program_id: int,
+    participant_id: int,
+) -> tuple[str, ...]:
+    available_roles: set[str] = set()
+    organization_memberships = memberships.get("organizations", [])
+    program_memberships = memberships.get("programs", [])
+
+    if any(
+        membership["organizer_id"] == organizer_id and membership["role"] in ORGANIZER_MEMBERSHIP_ROLES
+        for membership in organization_memberships
+    ):
+        available_roles.add("organizer")
+
+    if any(
+        membership["program_id"] == program_id and membership["role"] in PROGRAM_ORGANIZER_MEMBERSHIP_ROLES
+        for membership in program_memberships
+    ):
+        available_roles.add("organizer")
+
+    if any(
+        membership["program_id"] == program_id
+        and membership["role"] in PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES
+        and membership["participant_id"] == participant_id
+        for membership in program_memberships
+    ):
+        available_roles.add("participant")
+
+    return ordered_available_roles(available_roles)
+
+
+def default_scope_from_memberships(
+    conn: sqlite3.Connection,
+    user_id: int,
+    memberships: dict[str, list[dict]] | None = None,
+) -> dict | None:
+    memberships = memberships or list_user_memberships(conn, user_id)
+    program_memberships = memberships.get("programs", [])
+    organization_memberships = memberships.get("organizations", [])
+
+    scoped_program_memberships = [
+        membership
+        for membership in program_memberships
+        if membership["role"] in PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES | PROGRAM_ORGANIZER_MEMBERSHIP_ROLES
+    ]
+    selected_program_membership = scoped_program_memberships[0] if scoped_program_memberships else None
+
+    if selected_program_membership is not None:
+        organizer_id = int(selected_program_membership["organizer_id"])
+        program_id = int(selected_program_membership["program_id"])
+        participant_id = selected_program_membership["participant_id"]
+    else:
+        selected_organization_membership = organization_memberships[0] if organization_memberships else None
+        if selected_organization_membership is None:
+            return None
+        organizer_id = int(selected_organization_membership["organizer_id"])
+        program_row = default_program_row_for_organizer(conn, organizer_id)
+        if program_row is None:
+            return None
+        program_id = int(program_row["id"])
+        participant_id = None
+
+    if participant_id is None:
+        participant_membership = next(
+            (
+                membership
+                for membership in program_memberships
+                if membership["program_id"] == program_id
+                and membership["role"] in PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES
+                and membership["participant_id"] is not None
+            ),
+            None,
+        )
+        participant_id = participant_membership["participant_id"] if participant_membership is not None else None
+
+    if participant_id is None:
+        participant_id = default_preview_participant_id(conn, program_id)
+
+    if participant_id is None:
+        return None
+
+    available_roles = available_roles_from_memberships(
+        memberships,
+        organizer_id,
+        program_id,
+        int(participant_id),
+    )
+    if not available_roles:
+        return None
+
+    return {
+        "organizer_id": organizer_id,
+        "program_id": program_id,
+        "participant_id": int(participant_id),
+        "available_roles": available_roles,
+        "primary_role": primary_role_from_available_roles(available_roles),
+    }
+
+
+def scope_options_from_memberships(
+    conn: sqlite3.Connection,
+    user_id: int,
+    memberships: dict[str, list[dict]] | None = None,
+    current_scope: tuple[int, int, int] | None = None,
+) -> list[dict]:
+    memberships = memberships or list_user_memberships(conn, user_id)
+    options: list[dict] = []
+    seen_programs: set[int] = set()
+
+    for membership in memberships.get("programs", []):
+        program_id = int(membership["program_id"])
+        if program_id in seen_programs:
+            continue
+
+        participant_membership = next(
+            (
+                item
+                for item in memberships.get("programs", [])
+                if item["program_id"] == program_id
+                and item["role"] in PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES
+                and item["participant_id"] is not None
+            ),
+            None,
+        )
+        participant_id = (
+            int(participant_membership["participant_id"])
+            if participant_membership is not None
+            else default_preview_participant_id(conn, program_id)
+        )
+        if participant_id is None:
+            continue
+
+        organizer_id = int(membership["organizer_id"])
+        available_roles = available_roles_from_memberships(
+            memberships,
+            organizer_id,
+            program_id,
+            participant_id,
+        )
+        if not available_roles:
+            continue
+
+        option_scope = (organizer_id, program_id, participant_id)
+        options.append(
+            {
+                "organizerId": organizer_id,
+                "programId": program_id,
+                "participantId": participant_id,
+                "programName": membership["program_name"],
+                "programStatus": membership["program_status"],
+                "participantName": participant_membership["participant_name"] if participant_membership is not None else None,
+                "availableRoles": list(available_roles),
+                "primaryRole": primary_role_from_available_roles(available_roles),
+                "isCurrent": option_scope == current_scope if current_scope is not None else False,
+            }
+        )
+        seen_programs.add(program_id)
+
+    if not options:
+        fallback_scope = default_scope_from_memberships(conn, user_id, memberships)
+        if fallback_scope is not None:
+            options.append(
+                {
+                    "organizerId": fallback_scope["organizer_id"],
+                    "programId": fallback_scope["program_id"],
+                    "participantId": fallback_scope["participant_id"],
+                    "programName": f"Program #{fallback_scope['program_id']}",
+                    "programStatus": "active",
+                    "participantName": None,
+                    "availableRoles": list(fallback_scope["available_roles"]),
+                    "primaryRole": fallback_scope["primary_role"],
+                    "isCurrent": True,
+                }
+            )
+
+    return options
+
+
+def scope_membership_state(
+    memberships: dict[str, list[dict]],
+    organizer_id: int,
+    program_id: int,
+    participant_id: int,
+    available_scopes: list[dict] | None = None,
+) -> dict:
+    current_organization_memberships = [
+        membership
+        for membership in memberships.get("organizations", [])
+        if membership["organizer_id"] == organizer_id
+    ]
+    current_program_memberships = [
+        membership
+        for membership in memberships.get("programs", [])
+        if membership["program_id"] == program_id and (membership["participant_id"] in {participant_id, None})
+    ]
+    return {
+        "organizations": memberships.get("organizations", []),
+        "programs": memberships.get("programs", []),
+        "currentScope": {
+            "organizerId": organizer_id,
+            "programId": program_id,
+            "participantId": participant_id,
+            "organizerMemberships": current_organization_memberships,
+            "programMemberships": current_program_memberships,
+            "availableRoles": list(
+                available_roles_from_memberships(
+                    memberships,
+                    organizer_id,
+                    program_id,
+                    participant_id,
+                )
+            ),
+        },
+        "availableScopes": available_scopes or [],
+    }
+
+
+def legacy_scope_from_context_row(legacy_context_row: sqlite3.Row | None) -> dict | None:
+    if legacy_context_row is None:
+        return None
+
+    organizer_id = legacy_context_row["legacy_organizer_id"] if "legacy_organizer_id" in legacy_context_row.keys() else legacy_context_row["organizer_id"]
+    program_id = legacy_context_row["legacy_program_id"] if "legacy_program_id" in legacy_context_row.keys() else legacy_context_row["program_id"]
+    participant_id = legacy_context_row["legacy_participant_id"] if "legacy_participant_id" in legacy_context_row.keys() else legacy_context_row["participant_id"]
+    role = legacy_context_row["legacy_role"] if "legacy_role" in legacy_context_row.keys() else legacy_context_row["role"]
+
+    available_roles = ordered_available_roles(ROLE_CAPABILITIES.get(role, set()))
+    return {
+        "organizer_id": int(organizer_id),
+        "program_id": int(program_id),
+        "participant_id": int(participant_id),
+        "available_roles": available_roles,
+        "primary_role": role if role else primary_role_from_available_roles(available_roles),
+    }
+
+
+def session_scope_row(conn: sqlite3.Connection, session_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM session_scopes
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+
+
+def upsert_session_scope(
+    conn: sqlite3.Connection,
+    session_id: int,
+    organizer_id: int,
+    program_id: int,
+    participant_id: int,
+) -> sqlite3.Row:
+    timestamp = now_iso()
+    existing = session_scope_row(conn, session_id)
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO session_scopes (
+                session_id, organizer_id, program_id, participant_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, organizer_id, program_id, participant_id, timestamp, timestamp),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE session_scopes
+            SET organizer_id = ?, program_id = ?, participant_id = ?, updated_at = ?
+            WHERE session_id = ?
+            """,
+            (organizer_id, program_id, participant_id, timestamp, session_id),
+        )
+    return session_scope_row(conn, session_id)
+
+
+def ensure_session_scope(
+    conn: sqlite3.Connection,
+    session_id: int,
+    user_id: int,
+    legacy_context_row: sqlite3.Row | None = None,
+) -> tuple[sqlite3.Row | None, tuple[str, ...], str]:
+    existing_scope = session_scope_row(conn, session_id)
+    memberships = list_user_memberships(conn, user_id)
+
+    if existing_scope is not None:
+        available_roles = available_roles_from_memberships(
+            memberships,
+            existing_scope["organizer_id"],
+            existing_scope["program_id"],
+            existing_scope["participant_id"],
+        )
+        if available_roles:
+            return existing_scope, available_roles, primary_role_from_available_roles(available_roles)
+
+    derived_scope = default_scope_from_memberships(conn, user_id, memberships)
+    if derived_scope is None:
+        derived_scope = legacy_scope_from_context_row(legacy_context_row)
+    if derived_scope is None:
+        return None, tuple(), "demo"
+
+    persisted_scope = upsert_session_scope(
+        conn,
+        session_id,
+        derived_scope["organizer_id"],
+        derived_scope["program_id"],
+        derived_scope["participant_id"],
+    )
+    available_roles = available_roles_from_memberships(
+        memberships,
+        derived_scope["organizer_id"],
+        derived_scope["program_id"],
+        derived_scope["participant_id"],
+    )
+    if not available_roles:
+        available_roles = tuple(derived_scope["available_roles"])
+    primary_role = primary_role_from_available_roles(available_roles) if available_roles else derived_scope["primary_role"]
+    return persisted_scope, available_roles, primary_role
+
+
 def available_roles_for_context(context: RequestContext | None) -> list[str]:
-    role = context.role if context is not None else "demo"
+    if context is None:
+        return ["participant", "organizer"]
+
+    if context.available_roles:
+        ordered = ordered_available_roles(context.available_roles)
+        if ordered:
+            return list(ordered)
+
+    role = context.role
     capabilities = ROLE_CAPABILITIES.get(role, set())
-    ordered_roles = [candidate for candidate in ("participant", "organizer") if candidate in capabilities]
-    return ordered_roles or ["participant"]
+    ordered = ordered_available_roles(capabilities)
+    return list(ordered or ("participant",))
 
 
 def require_capability(context: RequestContext, capability: str) -> None:
-    capabilities = ROLE_CAPABILITIES.get(context.role, set())
+    capabilities = set(available_roles_for_context(context))
     if capability not in capabilities:
         raise AuthorizationError(f"Роль '{context.role}' не может выполнять действие типа '{capability}'")
 
@@ -357,15 +838,15 @@ def resolve_session_context(handler: BaseHTTPRequestHandler | None) -> RequestCo
                 s.user_id,
                 s.user_context_id,
                 s.expires_at,
-                uc.organizer_id,
-                uc.program_id,
-                uc.participant_id,
-                uc.role,
+                uc.organizer_id AS legacy_organizer_id,
+                uc.program_id AS legacy_program_id,
+                uc.participant_id AS legacy_participant_id,
+                uc.role AS legacy_role,
                 u.email,
                 u.full_name
             FROM sessions s
             JOIN users u ON u.id = s.user_id
-            JOIN user_contexts uc ON uc.id = s.user_context_id
+            LEFT JOIN user_contexts uc ON uc.id = s.user_context_id
             WHERE s.token_hash = ?
               AND s.expires_at > ?
               AND u.is_active = 1
@@ -375,6 +856,15 @@ def resolve_session_context(handler: BaseHTTPRequestHandler | None) -> RequestCo
         if session_row is None:
             return None
 
+        scope_row, available_roles, primary_role = ensure_session_scope(
+            conn,
+            session_row["session_id"],
+            session_row["user_id"],
+            session_row,
+        )
+        if scope_row is None:
+            return None
+
         conn.execute(
             "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
             (now_iso(), session_row["session_id"]),
@@ -382,14 +872,15 @@ def resolve_session_context(handler: BaseHTTPRequestHandler | None) -> RequestCo
         conn.commit()
 
     return RequestContext(
-        organizer_id=session_row["organizer_id"],
-        program_id=session_row["program_id"],
-        participant_id=session_row["participant_id"],
+        organizer_id=scope_row["organizer_id"],
+        program_id=scope_row["program_id"],
+        participant_id=scope_row["participant_id"],
         source="session",
         user_id=session_row["user_id"],
         session_id=session_row["session_id"],
         session_expires_at=session_row["expires_at"],
-        role=session_row["role"],
+        role=primary_role,
+        available_roles=available_roles,
         is_authenticated=True,
     )
 
@@ -407,9 +898,62 @@ def default_user_context_row(conn: sqlite3.Connection, user_id: int) -> sqlite3.
     ).fetchone()
 
 
+def ensure_legacy_user_context(
+    conn: sqlite3.Connection,
+    user_id: int,
+    scope: dict,
+) -> sqlite3.Row:
+    existing = conn.execute(
+        """
+        SELECT *
+        FROM user_contexts
+        WHERE user_id = ? AND organizer_id = ? AND program_id = ? AND participant_id = ? AND role = ?
+        LIMIT 1
+        """,
+        (
+            user_id,
+            scope["organizer_id"],
+            scope["program_id"],
+            scope["participant_id"],
+            scope["primary_role"],
+        ),
+    ).fetchone()
+    if existing is not None:
+        return existing
+
+    conn.execute(
+        """
+        INSERT INTO user_contexts (
+            user_id, organizer_id, program_id, participant_id, role, is_default
+        ) VALUES (?, ?, ?, ?, ?, 1)
+        """,
+        (
+            user_id,
+            scope["organizer_id"],
+            scope["program_id"],
+            scope["participant_id"],
+            scope["primary_role"],
+        ),
+    )
+    return default_user_context_row(conn, user_id)
+
+
 def get_me_state(context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
     available_roles = available_roles_for_context(context)
+    membership_state = {
+        "organizations": [],
+        "programs": [],
+        "currentScope": {
+            "organizerId": context.organizer_id,
+            "programId": context.program_id,
+            "participantId": context.participant_id,
+            "organizerMemberships": [],
+            "programMemberships": [],
+            "availableRoles": available_roles,
+        },
+        "availableScopes": [],
+    }
     me_state = {
         "authenticated": context.is_authenticated,
         "source": context.source,
@@ -433,6 +977,7 @@ def get_me_state(context: RequestContext | None = None) -> dict:
         ]
         if CONFIG.is_development
         else [],
+        "memberships": membership_state,
     }
 
     if context.user_id is not None:
@@ -441,6 +986,13 @@ def get_me_state(context: RequestContext | None = None) -> dict:
                 "SELECT id, email, full_name, user_type, last_login_at FROM users WHERE id = ?",
                 (context.user_id,),
             ).fetchone()
+            memberships = list_user_memberships(conn, context.user_id)
+            available_scopes = scope_options_from_memberships(
+                conn,
+                context.user_id,
+                memberships,
+                (context.organizer_id, context.program_id, context.participant_id),
+            )
         if user is not None:
             me_state["user"] = {
                 "id": user["id"],
@@ -449,6 +1001,13 @@ def get_me_state(context: RequestContext | None = None) -> dict:
                 "userType": user["user_type"],
                 "lastLoginAt": user["last_login_at"],
             }
+            me_state["memberships"] = scope_membership_state(
+                memberships,
+                context.organizer_id,
+                context.program_id,
+                context.participant_id,
+                available_scopes=available_scopes,
+            )
 
     return me_state
 
@@ -470,14 +1029,16 @@ def login_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> 
         if user is None or not verify_password(password, user["password_hash"]):
             raise ValueError("Неверный email или пароль")
 
-        user_context = default_user_context_row(conn, user["id"])
-        if user_context is None:
+        memberships = list_user_memberships(conn, user["id"])
+        scope = default_scope_from_memberships(conn, user["id"], memberships)
+        if scope is None:
             raise ValueError("Для этого пользователя не найден доступ к GoalMate")
+        user_context = ensure_legacy_user_context(conn, user["id"], scope)
 
         token = generate_session_token()
         token_hash = hash_session_token(token, CONFIG.session_secret)
         expires_at = session_expiry_iso()
-        conn.execute(
+        session_cursor = conn.execute(
             """
             INSERT INTO sessions (
                 user_id, user_context_id, token_hash, created_at, expires_at, last_seen_at, user_agent, ip_address
@@ -493,6 +1054,13 @@ def login_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> 
                 user_agent,
                 ip_address,
             ),
+        )
+        upsert_session_scope(
+            conn,
+            session_cursor.lastrowid,
+            scope["organizer_id"],
+            scope["program_id"],
+            scope["participant_id"],
         )
         conn.execute(
             "UPDATE users SET last_login_at = ? WHERE id = ?",
@@ -518,12 +1086,12 @@ def resolve_session_context_from_token(session_token: str) -> RequestContext | N
                 s.user_id,
                 s.user_context_id,
                 s.expires_at,
-                uc.organizer_id,
-                uc.program_id,
-                uc.participant_id,
-                uc.role
+                uc.organizer_id AS legacy_organizer_id,
+                uc.program_id AS legacy_program_id,
+                uc.participant_id AS legacy_participant_id,
+                uc.role AS legacy_role
             FROM sessions s
-            JOIN user_contexts uc ON uc.id = s.user_context_id
+            LEFT JOIN user_contexts uc ON uc.id = s.user_context_id
             WHERE s.token_hash = ?
               AND s.expires_at > ?
             """,
@@ -531,15 +1099,25 @@ def resolve_session_context_from_token(session_token: str) -> RequestContext | N
         ).fetchone()
         if session_row is None:
             return None
+        scope_row, available_roles, primary_role = ensure_session_scope(
+            conn,
+            session_row["session_id"],
+            session_row["user_id"],
+            session_row,
+        )
+        if scope_row is None:
+            return None
+        conn.commit()
     return RequestContext(
-        organizer_id=session_row["organizer_id"],
-        program_id=session_row["program_id"],
-        participant_id=session_row["participant_id"],
+        organizer_id=scope_row["organizer_id"],
+        program_id=scope_row["program_id"],
+        participant_id=scope_row["participant_id"],
         source="session",
         user_id=session_row["user_id"],
         session_id=session_row["session_id"],
         session_expires_at=session_row["expires_at"],
-        role=session_row["role"],
+        role=primary_role,
+        available_roles=available_roles,
         is_authenticated=True,
     )
 
@@ -553,6 +1131,96 @@ def logout_user(context: RequestContext | None = None) -> tuple[dict, str]:
 
     fallback_context = get_request_context(CONFIG)
     return {"me": get_me_state(fallback_context), "bootstrap": get_bootstrap_state(fallback_context)}, build_session_cookie("", clear=True)
+
+
+def resolve_session_context_from_session_id(session_id: int) -> RequestContext | None:
+    with connect_db() as conn:
+        session_row = conn.execute(
+            """
+            SELECT
+                s.id AS session_id,
+                s.user_id,
+                s.user_context_id,
+                s.expires_at,
+                uc.organizer_id AS legacy_organizer_id,
+                uc.program_id AS legacy_program_id,
+                uc.participant_id AS legacy_participant_id,
+                uc.role AS legacy_role
+            FROM sessions s
+            LEFT JOIN user_contexts uc ON uc.id = s.user_context_id
+            WHERE s.id = ?
+              AND s.expires_at > ?
+            """,
+            (session_id, now_iso()),
+        ).fetchone()
+        if session_row is None:
+            return None
+        scope_row, available_roles, primary_role = ensure_session_scope(
+            conn,
+            session_row["session_id"],
+            session_row["user_id"],
+            session_row,
+        )
+        if scope_row is None:
+            return None
+        conn.commit()
+    return RequestContext(
+        organizer_id=scope_row["organizer_id"],
+        program_id=scope_row["program_id"],
+        participant_id=scope_row["participant_id"],
+        source="session",
+        user_id=session_row["user_id"],
+        session_id=session_row["session_id"],
+        session_expires_at=session_row["expires_at"],
+        role=primary_role,
+        available_roles=available_roles,
+        is_authenticated=True,
+    )
+
+
+def switch_session_scope(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    if not context.is_authenticated or context.session_id is None or context.user_id is None:
+        raise AuthorizationError("Нужно войти в GoalMate, чтобы менять активный scope")
+
+    program_id = int(payload.get("programId", 0))
+    if not program_id:
+        raise ValueError("Нужен programId")
+
+    with connect_db() as conn:
+        memberships = list_user_memberships(conn, context.user_id)
+        available_scopes = scope_options_from_memberships(conn, context.user_id, memberships)
+        selected_scope = next((scope for scope in available_scopes if scope["programId"] == program_id), None)
+        if selected_scope is None:
+            raise AuthorizationError("Нет доступа к выбранной программе")
+
+        upsert_session_scope(
+            conn,
+            context.session_id,
+            selected_scope["organizerId"],
+            selected_scope["programId"],
+            selected_scope["participantId"],
+        )
+        legacy_context = ensure_legacy_user_context(
+            conn,
+            context.user_id,
+            {
+                "organizer_id": selected_scope["organizerId"],
+                "program_id": selected_scope["programId"],
+                "participant_id": selected_scope["participantId"],
+                "primary_role": selected_scope["primaryRole"],
+            },
+        )
+        conn.execute(
+            "UPDATE sessions SET user_context_id = ?, last_seen_at = ? WHERE id = ?",
+            (legacy_context["id"], now_iso(), context.session_id),
+        )
+        conn.commit()
+
+    resolved_context = resolve_session_context_from_session_id(context.session_id)
+    if resolved_context is None:
+        raise ValueError("Не удалось обновить активный scope")
+    return {"me": get_me_state(resolved_context), "bootstrap": get_bootstrap_state(resolved_context)}
 
 
 def init_db(force_reset: bool = False) -> None:
@@ -611,6 +1279,37 @@ def ensure_demo_auth_seed(conn: sqlite3.Connection, created_at: str | None = Non
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         user_contexts,
+    )
+
+    organization_memberships = [
+        (1, 1, CONFIG.dev_organizer_id, "owner", 1, created_at),
+        (2, 3, CONFIG.dev_organizer_id, "admin", 1, created_at),
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO organization_memberships (
+            id, user_id, organizer_id, role, is_default, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        organization_memberships,
+    )
+
+    program_memberships = [
+        (1, 1, CONFIG.dev_program_id, CONFIG.dev_participant_id, "participant", 1, created_at),
+        (2, 1, CONFIG.dev_program_id, None, "organizer", 0, created_at),
+        (3, 2, CONFIG.dev_program_id, CONFIG.dev_participant_id, "participant", 1, created_at),
+        (4, 3, CONFIG.dev_program_id, None, "organizer", 1, created_at),
+        (5, 1, 2, CONFIG.dev_participant_id, "participant", 0, created_at),
+        (6, 1, 2, None, "organizer", 0, created_at),
+        (7, 3, 2, None, "organizer", 0, created_at),
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO program_memberships (
+            id, user_id, program_id, participant_id, role, is_default, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        program_memberships,
     )
 
 
@@ -865,6 +1564,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (6, 1, 6, "participant", 74.0, 1320, 5, 7, 0, 0, joined_at),
         (7, 1, 7, "participant", 61.0, 980, 4, 7, 2, 1, joined_at),
         (8, 1, 8, "participant", 70.0, 1200, 5, 8, 0, 0, joined_at),
+        (9, 2, 1, "participant", 50.0, 420, 2, 4, 0, 0, joined_at),
     ]
     conn.executemany(
         """
@@ -880,6 +1580,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (1, 1, "Искры", "Держим ежедневный ритм без срывов больше двух дней подряд.", 65.0),
         (2, 1, "Фокус", "Собираем неделю без пропусков.", 72.0),
         (3, 1, "Импульс", "Больше отчётов, меньше шума.", 58.0),
+        (4, 2, "Архив", "Смотрим, как шаблон выглядит после завершения потока.", 54.0),
     ]
     conn.executemany(
         """
@@ -898,6 +1599,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (6, 2, 6, 0),
         (7, 3, 7, 1),
         (8, 3, 8, 0),
+        (9, 4, 1, 1),
     ]
     conn.executemany(
         """
@@ -920,6 +1622,10 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (10, 2, 4, "in_progress", 60.0, 0, 0, str(today), None, f"{today} 07:10:00"),
         (11, 1, 5, "missed", 0.0, 1, 1, str(today - timedelta(days=2)), None, f"{today - timedelta(days=2)} 11:40:00"),
         (12, 1, 7, "missed", 0.0, 1, 1, str(today - timedelta(days=3)), None, f"{today - timedelta(days=3)} 11:00:00"),
+        (13, 7, 1, "completed", 100.0, 1, 0, str(today - timedelta(days=70)), f"{today - timedelta(days=70)} 09:20:00", f"{today - timedelta(days=70)} 09:20:00"),
+        (14, 8, 1, "completed", 100.0, 1, 0, str(today - timedelta(days=69)), f"{today - timedelta(days=69)} 08:45:00", f"{today - timedelta(days=69)} 08:45:00"),
+        (15, 9, 1, "planned", 0.0, 1, 1, str(today - timedelta(days=65)), None, f"{today - timedelta(days=65)} 08:10:00"),
+        (16, 10, 1, "planned", 0.0, 1, 1, str(today - timedelta(days=63)), None, f"{today - timedelta(days=63)} 08:10:00"),
     ]
     conn.executemany(
         """
@@ -936,6 +1642,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (2, 5, 2, 1, "photo", "Сделал короткую разминку прямо перед первым созвоном.", "alex-stretch.jpg", "accepted", f"{today - timedelta(days=1)} 08:00:00"),
         (3, 7, 3, 1, "photo", "Сработало лучше, чем ожидала. Захотелось продолжить.", "olga-start.jpg", "accepted", f"{today - timedelta(days=1)} 08:12:00"),
         (4, 9, 4, 1, "photo", "Команда подстёгивает. Отчёт сдан вовремя.", "ivan-move.jpg", "accepted", f"{today - timedelta(days=1)} 10:03:00"),
+        (5, 13, 1, 7, "text", "Архивный поток остался как хороший шаблон для перезапуска.", None, "accepted", f"{today - timedelta(days=70)} 09:25:00"),
     ]
     conn.executemany(
         """
@@ -951,6 +1658,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (1, 1, 1, "Команда почти закрыла день", "В мини-команде 'Искры' уже 3 из 4 человек сдали отчёт. Можно добить день без лишнего напряжения.", "team", "accountability", "Открыть команду", 0, f"{today} 08:00:00"),
         (2, 1, 1, "Мягкий возврат доступен", "Ты пропустила вечернюю медитацию. Нажми один раз и вернись через короткую версию, без чувства провала.", "soft_return", "missed_task", "Вернуться мягко", 0, f"{today} 07:30:00"),
         (3, 1, 1, "Организатор открыл новую неделю", "В конструкторе потока появился новый блок про фокус и энергию. Можно заглянуть в задания заранее.", "program", "new_module", "Посмотреть блок", 1, f"{today - timedelta(days=1)} 18:10:00"),
+        (4, 1, 2, "Архивный поток доступен", "Можно переключиться в зимний шаблон и быстро клонировать его под новый запуск.", "program", "scope_switch", "Открыть архив", 1, f"{today - timedelta(days=5)} 12:00:00"),
     ]
     conn.executemany(
         """
@@ -973,6 +1681,12 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (0, 84, 51, 5, 75.0),
     ]:
         daily_metrics.append((None, 1, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
+    for offset, active, reports_count, missed, completion in [
+        (70, 18, 8, 3, 42.0),
+        (69, 19, 9, 2, 47.0),
+        (68, 21, 10, 2, 50.0),
+    ]:
+        daily_metrics.append((None, 2, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
     conn.executemany(
         """
         INSERT INTO daily_metrics (
@@ -2030,6 +2744,9 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             if path == "/api/auth/logout":
                 auth_payload, session_cookie = logout_user(context)
                 self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
+            if path == "/api/me/scope":
+                self.send_json({"ok": True, "data": switch_session_scope(payload, context)})
                 return
             if path == "/api/reports":
                 self.send_json({"ok": True, "data": submit_report(payload, context)})

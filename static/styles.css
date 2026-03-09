@@ -190,6 +190,7 @@ textarea {
 .auth-panel {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 8px 12px;
   border-radius: 18px;
@@ -209,6 +210,15 @@ textarea {
 .auth-panel-copy span {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.scope-switcher {
+  min-width: 220px;
+}
+
+.scope-switcher span {
+  font-size: 0.76rem;
+  color: var(--muted);
 }
 
 .role-button {

@@ -16,6 +16,7 @@ class RequestContext:
     session_id: int | None = None
     session_expires_at: str | None = None
     role: str = "demo"
+    available_roles: tuple[str, ...] = ("participant", "organizer")
     is_authenticated: bool = False
 
 
@@ -28,4 +29,5 @@ def get_request_context(config: AppConfig, handler: BaseHTTPRequestHandler | Non
         participant_id=config.dev_participant_id,
         source="development-fallback",
         role="mixed",
+        available_roles=("participant", "organizer"),
     )

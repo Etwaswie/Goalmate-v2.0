@@ -86,6 +86,11 @@ function availableRoles() {
   return Array.isArray(roles) && roles.length ? roles : ["participant", "organizer"];
 }
 
+function availableScopes() {
+  const scopes = state.me?.memberships?.availableScopes;
+  return Array.isArray(scopes) ? scopes : [];
+}
+
 function canUseRole(role) {
   return availableRoles().includes(role);
 }
@@ -192,6 +197,31 @@ async function performAuthRequest(path, payload = null) {
   }
 }
 
+async function performScopeRequest(programId) {
+  state.busy = true;
+  render();
+  try {
+    const response = await request("/api/me/scope", {
+      method: "POST",
+      body: JSON.stringify({ programId }),
+    });
+    state.app = response.bootstrap;
+    state.me = response.me;
+    syncRoleFromAccess();
+    const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
+    if (!allowedCurrentView) {
+      state.currentView = "overview";
+    }
+    return true;
+  } catch (error) {
+    showToast(error.message, true);
+    return false;
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 function setRole(nextRole) {
   if (!canUseRole(nextRole)) {
     showToast(`Текущий аккаунт не имеет доступа к роли "${roleLabel(nextRole)}"`, true);
@@ -271,11 +301,13 @@ function renderAuthPanel() {
   }
 
   authPanelRoot.className = "auth-panel";
+  const organizationAccessCount = state.me.memberships?.organizations?.length ?? 0;
+  const programAccessCount = state.me.memberships?.programs?.length ?? 0;
   const title = state.me.authenticated
     ? state.me.user?.fullName || state.me.user?.email || "Аккаунт"
     : "Auth foundation";
   const subtitle = state.me.authenticated
-    ? `${state.me.user?.email || ""} • ${state.me.source}`
+    ? `${state.me.user?.email || ""} • ${state.me.source} • ${organizationAccessCount} org / ${programAccessCount} program access`
     : "dev fallback active";
   const badge = state.me.authenticated
     ? `<span class="badge success">session</span>`
@@ -283,6 +315,26 @@ function renderAuthPanel() {
   const action = state.me.authenticated
     ? `<button class="inline-button" type="button" data-action="logout">Выйти</button>`
     : `<button class="inline-button" type="button" data-action="open-login">Demo login</button>`;
+  const currentProgramId = state.me.memberships?.currentScope?.programId;
+  const scopeSwitcher =
+    state.me.authenticated && availableScopes().length > 1
+      ? `
+        <label class="scope-switcher">
+          <span>Active scope</span>
+          <select data-scope-switch ${state.busy ? "disabled" : ""}>
+            ${availableScopes()
+              .map(
+                (scope) => `
+                  <option value="${scope.programId}" ${scope.programId === currentProgramId ? "selected" : ""}>
+                    ${escapeHtml(scope.programName)} · ${escapeHtml((scope.availableRoles || []).join(" / "))} · ${escapeHtml(scope.programStatus)}
+                  </option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+      `
+      : "";
 
   authPanelRoot.innerHTML = `
     ${badge}
@@ -290,6 +342,7 @@ function renderAuthPanel() {
       <strong>${escapeHtml(title)}</strong>
       <span>${escapeHtml(subtitle)}</span>
     </div>
+    ${scopeSwitcher}
     ${action}
   `;
 }
@@ -1422,6 +1475,19 @@ document.addEventListener("submit", async (event) => {
     await performRequest("/api/private-challenges", payload);
     form.reset();
     showToast("Приватный челлендж создан");
+  }
+});
+
+document.addEventListener("change", async (event) => {
+  const scopeSwitch = event.target.closest("[data-scope-switch]");
+  if (!scopeSwitch || state.busy) return;
+
+  const programId = Number(scopeSwitch.value || 0);
+  if (!programId) return;
+
+  const ok = await performScopeRequest(programId);
+  if (ok) {
+    showToast("Активный scope переключён");
   }
 });
 
