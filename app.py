@@ -1,218 +1,228 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+GoalMate — Backend v2.2 (Full Auth + Full CRUD Modules/Lessons)
+"""
 from __future__ import annotations
-
 import json
 import os
 import sqlite3
+import hashlib
+import secrets
+import mimetypes
 from datetime import date, datetime, timedelta
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
+import base64
 
-
+# === Конфигурация ===
 ROOT_DIR = Path(__file__).resolve().parent
 STATIC_DIR = ROOT_DIR / "static"
 DATA_DIR = ROOT_DIR / "data"
+UPLOADS_DIR = ROOT_DIR / "uploads"
 DB_PATH = DATA_DIR / "goalmate.db"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8000"))
+TOKEN_EXPIRY_HOURS = 24
 
-CURRENT_ORGANIZER_ID = 1
-CURRENT_PROGRAM_ID = 1
-CURRENT_PARTICIPANT_ID = 1
+# === Инициализация папок ===
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-
+# === Схема БД ===
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS organizers (
+-- Пользователи
+CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    brand_name TEXT NOT NULL,
-    primary_color TEXT NOT NULL,
-    accent_color TEXT NOT NULL,
-    support_email TEXT NOT NULL,
-    tagline TEXT NOT NULL
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('creator', 'participant')),
+    avatar_bg TEXT DEFAULT '#D4E8FF',
+    created_at TEXT NOT NULL,
+    last_active_at TEXT
 );
-
+-- Сессии
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+-- Марафоны
 CREATE TABLE IF NOT EXISTS programs (
     id INTEGER PRIMARY KEY,
-    organizer_id INTEGER NOT NULL,
-    source_program_id INTEGER,
+    creator_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL,
-    audience TEXT NOT NULL,
+    goal_text TEXT NOT NULL,
     start_date TEXT NOT NULL,
     end_date TEXT NOT NULL,
-    status TEXT NOT NULL,
-    FOREIGN KEY (organizer_id) REFERENCES organizers(id),
-    FOREIGN KEY (source_program_id) REFERENCES programs(id)
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'archived')),
+    cover_image TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS modules (
+-- Коды приглашения
+CREATE TABLE IF NOT EXISTS invitation_codes (
     id INTEGER PRIMARY KEY,
     program_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    week_label TEXT NOT NULL,
-    position INTEGER NOT NULL,
+    code TEXT NOT NULL UNIQUE,
+    max_uses INTEGER DEFAULT 1,
+    used_count INTEGER DEFAULT 0,
+    expires_at TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
     FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY,
-    program_id INTEGER NOT NULL,
-    module_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    task_type TEXT NOT NULL,
-    submission_mode TEXT NOT NULL,
-    points INTEGER NOT NULL,
-    estimated_minutes INTEGER NOT NULL,
-    scheduled_for TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    soft_return_copy TEXT NOT NULL,
-    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
-    FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS participants (
-    id INTEGER PRIMARY KEY,
-    full_name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    city TEXT NOT NULL,
-    bio TEXT NOT NULL,
-    avatar_bg TEXT NOT NULL,
-    streak_days INTEGER NOT NULL DEFAULT 0,
-    last_active_at TEXT NOT NULL
-);
-
+-- Участие
 CREATE TABLE IF NOT EXISTS enrollments (
     id INTEGER PRIMARY KEY,
     program_id INTEGER NOT NULL,
     participant_id INTEGER NOT NULL,
-    role TEXT NOT NULL DEFAULT 'participant',
-    progress_percent REAL NOT NULL DEFAULT 0,
-    xp INTEGER NOT NULL DEFAULT 0,
-    completed_tasks INTEGER NOT NULL DEFAULT 0,
-    total_tasks INTEGER NOT NULL DEFAULT 0,
-    soft_return_count INTEGER NOT NULL DEFAULT 0,
-    at_risk INTEGER NOT NULL DEFAULT 0,
+    invitation_code_id INTEGER,
+    progress_percent REAL DEFAULT 0,
+    xp INTEGER DEFAULT 0,
+    completed_lessons INTEGER DEFAULT 0,
+    total_lessons INTEGER DEFAULT 0,
+    streak_days INTEGER DEFAULT 0,
     joined_at TEXT NOT NULL,
+    last_activity_at TEXT,
     FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (invitation_code_id) REFERENCES invitation_codes(id),
     UNIQUE (program_id, participant_id)
 );
-
-CREATE TABLE IF NOT EXISTS teams (
+-- Модули
+CREATE TABLE IF NOT EXISTS modules (
     id INTEGER PRIMARY KEY,
-    program_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    goal_text TEXT NOT NULL,
-    progress_percent REAL NOT NULL DEFAULT 0,
-    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS team_members (
-    id INTEGER PRIMARY KEY,
-    team_id INTEGER NOT NULL,
-    participant_id INTEGER NOT NULL,
-    is_captain INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
-    UNIQUE (team_id, participant_id)
-);
-
-CREATE TABLE IF NOT EXISTS participant_tasks (
-    id INTEGER PRIMARY KEY,
-    task_id INTEGER NOT NULL,
-    participant_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    progress_percent REAL NOT NULL DEFAULT 0,
-    report_required INTEGER NOT NULL DEFAULT 0,
-    soft_return_available INTEGER NOT NULL DEFAULT 0,
-    planned_for TEXT NOT NULL,
-    completed_at TEXT,
-    last_interaction_at TEXT NOT NULL,
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
-    UNIQUE (task_id, participant_id)
-);
-
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY,
-    participant_task_id INTEGER NOT NULL UNIQUE,
-    participant_id INTEGER NOT NULL,
-    task_id INTEGER NOT NULL,
-    report_type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    attachment_name TEXT,
-    status TEXT NOT NULL,
-    submitted_at TEXT NOT NULL,
-    FOREIGN KEY (participant_task_id) REFERENCES participant_tasks(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER PRIMARY KEY,
-    participant_id INTEGER NOT NULL,
     program_id INTEGER NOT NULL,
     title TEXT NOT NULL,
-    message TEXT NOT NULL,
-    notification_type TEXT NOT NULL,
-    trigger_reason TEXT NOT NULL,
-    cta_label TEXT NOT NULL,
-    is_read INTEGER NOT NULL DEFAULT 0,
+    description TEXT,
+    position INTEGER NOT NULL,
+    unlock_date TEXT,
+    deadline TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
     FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
 );
-
+-- Уроки
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY,
+    module_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    content_html TEXT,
+    position INTEGER NOT NULL,
+    unlock_date TEXT,
+    deadline TEXT,
+    points INTEGER DEFAULT 100,
+    estimated_minutes INTEGER DEFAULT 15,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE
+);
+-- Вложения
+CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY,
+    lesson_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE
+);
+-- Прогресс
+CREATE TABLE IF NOT EXISTS lesson_progress (
+    id INTEGER PRIMARY KEY,
+    lesson_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'locked' CHECK (status IN ('locked', 'available', 'in_progress', 'completed')),
+    progress_percent REAL DEFAULT 0,
+    completed_at TEXT,
+    last_interaction_at TEXT NOT NULL,
+    FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (lesson_id, participant_id)
+);
+-- Комментарии
+CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY,
+    lesson_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES users(id) ON DELETE CASCADE
+);
+-- Оценки
+CREATE TABLE IF NOT EXISTS ratings (
+    id INTEGER PRIMARY KEY,
+    lesson_id INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (lesson_id, participant_id)
+);
+-- Достижения
+CREATE TABLE IF NOT EXISTS achievements (
+    id INTEGER PRIMARY KEY,
+    participant_id INTEGER NOT NULL,
+    achievement_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    icon TEXT NOT NULL,
+    unlocked_at TEXT NOT NULL,
+    FOREIGN KEY (participant_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (participant_id, achievement_key)
+);
+-- Метрики
 CREATE TABLE IF NOT EXISTS daily_metrics (
     id INTEGER PRIMARY KEY,
     program_id INTEGER NOT NULL,
     metric_date TEXT NOT NULL,
-    active_participants INTEGER NOT NULL,
-    reports_submitted INTEGER NOT NULL,
-    missed_tasks INTEGER NOT NULL,
-    completion_rate REAL NOT NULL,
-    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
+    active_participants INTEGER DEFAULT 0,
+    lessons_completed INTEGER DEFAULT 0,
+    comments_count INTEGER DEFAULT 0,
+    avg_rating REAL DEFAULT 0,
+    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
+    UNIQUE (program_id, metric_date)
 );
-
-CREATE TABLE IF NOT EXISTS private_challenges (
-    id INTEGER PRIMARY KEY,
-    creator_participant_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    goal_text TEXT NOT NULL,
-    target_per_week INTEGER NOT NULL,
-    target_team_size INTEGER NOT NULL,
-    start_date TEXT NOT NULL,
-    end_date TEXT NOT NULL,
-    status TEXT NOT NULL,
-    visibility TEXT NOT NULL,
-    FOREIGN KEY (creator_participant_id) REFERENCES participants(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS private_challenge_members (
-    id INTEGER PRIMARY KEY,
-    challenge_id INTEGER NOT NULL,
-    participant_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    joined_at TEXT NOT NULL,
-    FOREIGN KEY (challenge_id) REFERENCES private_challenges(id) ON DELETE CASCADE,
-    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
-    UNIQUE (challenge_id, participant_id)
-);
+-- Индексы
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_invitation_codes_code ON invitation_codes(code);
+CREATE INDEX IF NOT EXISTS idx_enrollments_participant ON enrollments(participant_id);
+CREATE INDEX IF NOT EXISTS idx_lessons_module ON lessons(module_id);
+CREATE INDEX IF NOT EXISTS idx_progress_participant ON lesson_progress(participant_id);
+CREATE INDEX IF NOT EXISTS idx_comments_lesson ON comments(lesson_id);
+CREATE INDEX IF NOT EXISTS idx_ratings_lesson ON ratings(lesson_id);
 """
-
 
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat(sep=" ")
 
+def hash_password(password: str, salt: str = None) -> tuple[str, str]:
+    if salt is None: salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+    return hashed.hex(), salt
+
+def verify_password(password: str, password_hash: str, salt: str) -> bool:
+    hashed, _ = hash_password(password, salt)
+    return hashed == password_hash
+
+def generate_token() -> str:
+    return secrets.token_urlsafe(32)
+
+def generate_invitation_code() -> str:
+    return secrets.token_hex(4).upper()
 
 def connect_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -220,1426 +230,626 @@ def connect_db() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
-
 def init_db(force_reset: bool = False) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     if force_reset and DB_PATH.exists():
         DB_PATH.unlink()
-
     with connect_db() as conn:
         conn.executescript(SCHEMA_SQL)
-        has_data = conn.execute("SELECT COUNT(*) AS count FROM organizers").fetchone()["count"]
-        if not has_data:
-            seed_demo(conn)
-            conn.commit()
-
-
-def seed_demo(conn: sqlite3.Connection) -> None:
-    today = date.today()
-    joined_at = f"{today - timedelta(days=10)} 09:00:00"
-    current_time = now_iso()
-
-    conn.execute(
-        """
-        INSERT INTO organizers (id, name, email, brand_name, primary_color, accent_color, support_email, tagline)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            CURRENT_ORGANIZER_ID,
-            "Мария Волкова",
-            "maria@goalmate.local",
-            "Habit Power",
-            "#10A37F",
-            "#FF8A3D",
-            "support@goalmate.local",
-            "Платформа-конструктор для марафонов, интенсивов и челленджей",
-        ),
-    )
-
-    programs = [
-        (
-            1,
-            CURRENT_ORGANIZER_ID,
-            None,
-            "Весенний wellness-марафон Habit Power",
-            "spring-wellness",
-            "Поток для участников, которым нужен красивый трекер, поддержка команды и мягкий возврат после пропуска.",
-            "B2B cohort",
-            str(today - timedelta(days=10)),
-            str(today + timedelta(days=21)),
-            "active",
-        ),
-        (
-            2,
-            CURRENT_ORGANIZER_ID,
-            None,
-            "Зимний перезапуск привычек",
-            "winter-reset",
-            "Архивный поток, который можно быстро клонировать и адаптировать под новый запуск.",
-            "Reusable template",
-            str(today - timedelta(days=80)),
-            str(today - timedelta(days=40)),
-            "archived",
-        ),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO programs (id, organizer_id, source_program_id, name, slug, description, audience, start_date, end_date, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        programs,
-    )
-
-    modules = [
-        (1, 1, "Запуск ритма", "Лёгкий старт без чувства перегруза и с быстрыми победами.", "Неделя 1", 1),
-        (2, 1, "Фокус и энергия", "Точки опоры на середину марафона и защита от слива.", "Неделя 2", 2),
-        (3, 1, "Команда и рефлексия", "Сообщество, обратная связь и закрепление результатов.", "Неделя 3", 3),
-        (4, 2, "Перезагрузка", "Блок старта архивного шаблона.", "Неделя 1", 1),
-        (5, 2, "Стабилизация", "Блок удержания темпа.", "Неделя 2", 2),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO modules (id, program_id, title, description, week_label, position)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        modules,
-    )
-
-    tasks = [
-        (
-            1,
-            1,
-            1,
-            "ДЗ №5: Запишите утреннюю разминку",
-            "Короткое видео или фото с вашей утренней активацией. Цель — войти в ритм без перегруза.",
-            "video",
-            "photo",
-            100,
-            12,
-            str(today - timedelta(days=1)),
-            1,
-            "Пропуск не обнуляет прогресс. Вернись с укороченной версией на 5 минут.",
-        ),
-        (
-            2,
-            1,
-            2,
-            "ДЗ №6: Прочитать 1 главу книги",
-            "Подчеркните одну мысль, которая реально влияет на ваш текущий фокус.",
-            "reading",
-            "checklist",
-            150,
-            25,
-            str(today),
-            2,
-            "Вернись в задачу через одну ключевую мысль вместо идеального конспекта.",
-        ),
-        (
-            3,
-            1,
-            2,
-            "ДЗ №7: Вечерний дневник благодарности",
-            "Три наблюдения за день и одна вещь, которую хочется повторить завтра.",
-            "journal",
-            "text",
-            80,
-            10,
-            str(today + timedelta(days=1)),
-            3,
-            "Если день выпал, заполни дневник одним абзацем без чувства провала.",
-        ),
-        (
-            4,
-            1,
-            2,
-            "ДЗ №4: Вечерняя медитация",
-            "10 минут на выдох, сброс шума и закрытие дня.",
-            "meditation",
-            "voice",
-            120,
-            10,
-            str(today - timedelta(days=1)),
-            4,
-            "Ничего страшного: вернись через короткую двухминутную версию и продолжай марафон.",
-        ),
-        (
-            5,
-            1,
-            3,
-            "ДЗ №8: Напишите другу о цели недели",
-            "Сформулируйте цель так, чтобы друг мог проверить факт её достижения.",
-            "accountability",
-            "text",
-            90,
-            7,
-            str(today + timedelta(days=2)),
-            5,
-            "Если не получилось вовремя, отправь одно сообщение с самой важной целью.",
-        ),
-        (
-            6,
-            1,
-            3,
-            "ДЗ №9: План на завтра",
-            "Определи один обязательный шаг, который точно будет сделан утром.",
-            "planning",
-            "text",
-            60,
-            5,
-            str(today + timedelta(days=2)),
-            6,
-            "Вернись с микропланом из одного шага, а не идеальным расписанием.",
-        ),
-        (
-            7,
-            2,
-            4,
-            "Разгрузить календарь",
-            "Освободить один слот и вернуть себе внимание.",
-            "planning",
-            "text",
-            60,
-            10,
-            str(today - timedelta(days=70)),
-            1,
-            "Сделай один шаг вместо полной ревизии.",
-        ),
-        (
-            8,
-            2,
-            4,
-            "5 минут движения",
-            "Короткая физическая активация на старте дня.",
-            "movement",
-            "photo",
-            70,
-            5,
-            str(today - timedelta(days=69)),
-            2,
-            "Подойдёт даже прогулка вокруг дома.",
-        ),
-        (
-            9,
-            2,
-            5,
-            "Антишум-чек",
-            "Поймать главный отвлекающий триггер недели.",
-            "reflection",
-            "text",
-            90,
-            8,
-            str(today - timedelta(days=65)),
-            3,
-            "Достаточно одной честной заметки.",
-        ),
-        (
-            10,
-            2,
-            5,
-            "Фокус-обещание",
-            "Отправить напарнику одну цель до пятницы.",
-            "accountability",
-            "text",
-            90,
-            6,
-            str(today - timedelta(days=63)),
-            4,
-            "Даже короткое сообщение уже работает.",
-        ),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO tasks (
-            id, program_id, module_id, title, description, task_type, submission_mode,
-            points, estimated_minutes, scheduled_for, position, soft_return_copy
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        tasks,
-    )
-
-    participants = [
-        (1, "Анна Петрова", "anna@demo.local", "Москва", "Строю систему привычек без жёсткого давления.", "#FFD9C5", 6, f"{today} 08:15:00"),
-        (2, "Александр К.", "alex@demo.local", "Сочи", "Хочу держать фокус даже в плотном графике.", "#B7E7E0", 12, f"{today} 07:40:00"),
-        (3, "Ольга Р.", "olga@demo.local", "Казань", "Ищу ритм, который можно не сорвать через неделю.", "#F7E8AE", 10, f"{today - timedelta(days=1)} 19:00:00"),
-        (4, "Иван С.", "ivan@demo.local", "Минск", "Мне нужна поддержка команды и понятный прогресс.", "#F6C4D0", 8, f"{today - timedelta(days=1)} 14:30:00"),
-        (5, "Марина З.", "marina@demo.local", "Екатеринбург", "Прокачиваю дисциплину через мягкие ритуалы.", "#D7D4FF", 7, f"{today - timedelta(days=2)} 10:10:00"),
-        (6, "Кирилл В.", "kirill@demo.local", "Санкт-Петербург", "Люблю короткие челленджи с друзьями.", "#D0F0C0", 5, f"{today} 06:55:00"),
-        (7, "Илона П.", "ilona@demo.local", "Тбилиси", "Собираю устойчивую утреннюю рутину.", "#FFE6A7", 9, f"{today - timedelta(days=3)} 12:20:00"),
-        (8, "Лев Н.", "lev@demo.local", "Новосибирск", "Тестирую привычки как продуктовые гипотезы.", "#C5E1FF", 11, f"{today} 08:35:00"),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO participants (id, full_name, email, city, bio, avatar_bg, streak_days, last_active_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        participants,
-    )
-
-    enrollments = [
-        (1, 1, 1, "participant", 75.0, 1250, 3, 4, 1, 0, joined_at),
-        (2, 1, 2, "participant", 92.0, 2150, 7, 8, 0, 0, joined_at),
-        (3, 1, 3, "participant", 89.0, 1980, 7, 8, 0, 0, joined_at),
-        (4, 1, 4, "participant", 87.0, 1850, 6, 7, 0, 0, joined_at),
-        (5, 1, 5, "participant", 76.0, 1380, 5, 7, 1, 1, joined_at),
-        (6, 1, 6, "participant", 74.0, 1320, 5, 7, 0, 0, joined_at),
-        (7, 1, 7, "participant", 61.0, 980, 4, 7, 2, 1, joined_at),
-        (8, 1, 8, "participant", 70.0, 1200, 5, 8, 0, 0, joined_at),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO enrollments (
-            id, program_id, participant_id, role, progress_percent, xp, completed_tasks,
-            total_tasks, soft_return_count, at_risk, joined_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        enrollments,
-    )
-
-    teams = [
-        (1, 1, "Искры", "Держим ежедневный ритм без срывов больше двух дней подряд.", 65.0),
-        (2, 1, "Фокус", "Собираем неделю без пропусков.", 72.0),
-        (3, 1, "Импульс", "Больше отчётов, меньше шума.", 58.0),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO teams (id, program_id, name, goal_text, progress_percent)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        teams,
-    )
-
-    team_members = [
-        (1, 1, 1, 0),
-        (2, 1, 2, 1),
-        (3, 1, 3, 0),
-        (4, 1, 4, 0),
-        (5, 2, 5, 1),
-        (6, 2, 6, 0),
-        (7, 3, 7, 1),
-        (8, 3, 8, 0),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO team_members (id, team_id, participant_id, is_captain)
-        VALUES (?, ?, ?, ?)
-        """,
-        team_members,
-    )
-
-    participant_tasks = [
-        (1, 1, 1, "completed", 100.0, 1, 0, str(today - timedelta(days=1)), f"{today - timedelta(days=1)} 09:05:00", f"{today - timedelta(days=1)} 09:05:00"),
-        (2, 2, 1, "in_progress", 50.0, 0, 0, str(today), None, f"{today} 08:30:00"),
-        (3, 3, 1, "planned", 0.0, 1, 1, str(today + timedelta(days=1)), None, current_time),
-        (4, 4, 1, "missed", 0.0, 1, 1, str(today - timedelta(days=1)), None, f"{today - timedelta(days=1)} 22:00:00"),
-        (5, 1, 2, "completed", 100.0, 1, 0, str(today - timedelta(days=1)), f"{today - timedelta(days=1)} 07:55:00", f"{today - timedelta(days=1)} 07:55:00"),
-        (6, 2, 2, "completed", 100.0, 0, 0, str(today), f"{today} 07:30:00", f"{today} 07:30:00"),
-        (7, 1, 3, "completed", 100.0, 1, 0, str(today - timedelta(days=1)), f"{today - timedelta(days=1)} 08:10:00", f"{today - timedelta(days=1)} 08:10:00"),
-        (8, 2, 3, "completed", 100.0, 0, 0, str(today), f"{today} 06:40:00", f"{today} 06:40:00"),
-        (9, 1, 4, "completed", 100.0, 1, 0, str(today - timedelta(days=1)), f"{today - timedelta(days=1)} 10:00:00", f"{today - timedelta(days=1)} 10:00:00"),
-        (10, 2, 4, "in_progress", 60.0, 0, 0, str(today), None, f"{today} 07:10:00"),
-        (11, 1, 5, "missed", 0.0, 1, 1, str(today - timedelta(days=2)), None, f"{today - timedelta(days=2)} 11:40:00"),
-        (12, 1, 7, "missed", 0.0, 1, 1, str(today - timedelta(days=3)), None, f"{today - timedelta(days=3)} 11:00:00"),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO participant_tasks (
-            id, task_id, participant_id, status, progress_percent, report_required,
-            soft_return_available, planned_for, completed_at, last_interaction_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        participant_tasks,
-    )
-
-    reports = [
-        (1, 1, 1, 1, "photo", "Отличный старт! Видео принято. Ритм зашёл с первого дня.", "warmup.mp4", "accepted", f"{today - timedelta(days=1)} 09:08:00"),
-        (2, 5, 2, 1, "photo", "Сделал короткую разминку прямо перед первым созвоном.", "alex-stretch.jpg", "accepted", f"{today - timedelta(days=1)} 08:00:00"),
-        (3, 7, 3, 1, "photo", "Сработало лучше, чем ожидала. Захотелось продолжить.", "olga-start.jpg", "accepted", f"{today - timedelta(days=1)} 08:12:00"),
-        (4, 9, 4, 1, "photo", "Команда подстёгивает. Отчёт сдан вовремя.", "ivan-move.jpg", "accepted", f"{today - timedelta(days=1)} 10:03:00"),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO reports (
-            id, participant_task_id, participant_id, task_id, report_type, content,
-            attachment_name, status, submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        reports,
-    )
-
-    notifications = [
-        (1, 1, 1, "Команда почти закрыла день", "В мини-команде 'Искры' уже 3 из 4 человек сдали отчёт. Можно добить день без лишнего напряжения.", "team", "accountability", "Открыть команду", 0, f"{today} 08:00:00"),
-        (2, 1, 1, "Мягкий возврат доступен", "Ты пропустила вечернюю медитацию. Нажми один раз и вернись через короткую версию, без чувства провала.", "soft_return", "missed_task", "Вернуться мягко", 0, f"{today} 07:30:00"),
-        (3, 1, 1, "Организатор открыл новую неделю", "В конструкторе потока появился новый блок про фокус и энергию. Можно заглянуть в задания заранее.", "program", "new_module", "Посмотреть блок", 1, f"{today - timedelta(days=1)} 18:10:00"),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO notifications (
-            id, participant_id, program_id, title, message, notification_type,
-            trigger_reason, cta_label, is_read, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        notifications,
-    )
-
-    daily_metrics = []
-    for offset, active, reports_count, missed, completion in [
-        (6, 68, 34, 11, 58.0),
-        (5, 72, 39, 9, 61.0),
-        (4, 76, 42, 8, 64.0),
-        (3, 74, 37, 12, 62.0),
-        (2, 79, 45, 7, 69.0),
-        (1, 81, 48, 6, 72.0),
-        (0, 84, 51, 5, 75.0),
-    ]:
-        daily_metrics.append((None, 1, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
-    conn.executemany(
-        """
-        INSERT INTO daily_metrics (
-            id, program_id, metric_date, active_participants, reports_submitted, missed_tasks, completion_rate
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        daily_metrics,
-    )
-
-    private_challenges = [
-        (1, 1, "Английский по утрам", "Личный B2C-челлендж для мини-команды друзей без организатора.", "5 коротких сессий английского в неделю", 5, 4, str(today), str(today + timedelta(days=21)), "active", "friends"),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO private_challenges (
-            id, creator_participant_id, name, description, goal_text, target_per_week,
-            target_team_size, start_date, end_date, status, visibility
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        private_challenges,
-    )
-
-    challenge_members = [
-        (1, 1, 1, "creator", current_time),
-        (2, 1, 6, "member", current_time),
-        (3, 1, 8, "member", current_time),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO private_challenge_members (id, challenge_id, participant_id, role, joined_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        challenge_members,
-    )
-
+        conn.commit()
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:
-    if row is None:
-        return None
+    if row is None: return None
     return {key: row[key] for key in row.keys()}
 
-
-def progress_badge(status: str) -> dict[str, str]:
-    mapping = {
-        "completed": {"label": "Выполнено", "tone": "success"},
-        "in_progress": {"label": "В процессе", "tone": "info"},
-        "planned": {"label": "Запланировано", "tone": "neutral"},
-        "missed": {"label": "Пропущено", "tone": "warning"},
-    }
-    return mapping.get(status, {"label": status, "tone": "neutral"})
-
-
-def get_modules_with_tasks(conn: sqlite3.Connection, program_id: int) -> list[dict]:
-    modules = [row_to_dict(row) for row in conn.execute(
-        "SELECT * FROM modules WHERE program_id = ? ORDER BY position",
-        (program_id,),
-    ).fetchall()]
-
-    tasks = [row_to_dict(row) for row in conn.execute(
-        """
-        SELECT t.*, m.title AS module_title
-        FROM tasks t
-        JOIN modules m ON m.id = t.module_id
-        WHERE t.program_id = ?
-        ORDER BY m.position, t.position
-        """,
-        (program_id,),
-    ).fetchall()]
-
-    grouped: dict[int, list[dict]] = {}
-    for task in tasks:
-        grouped.setdefault(task["module_id"], []).append(task)
-
-    for module in modules:
-        module["tasks"] = grouped.get(module["id"], [])
-    return modules
-
-
-def get_bootstrap_state() -> dict:
+def get_user_by_token(token: str) -> dict | None:
     with connect_db() as conn:
-        program = row_to_dict(conn.execute(
-            """
-            SELECT p.*, o.brand_name, o.primary_color, o.accent_color, o.tagline
-            FROM programs p
-            JOIN organizers o ON o.id = p.organizer_id
-            WHERE p.id = ?
-            """,
-            (CURRENT_PROGRAM_ID,),
-        ).fetchone())
+        result = conn.execute("""
+            SELECT u.*, t.expires_at FROM users u
+            JOIN auth_tokens t ON t.user_id = u.id
+            WHERE t.token = ? AND t.expires_at > ?
+        """, (token, now_iso())).fetchone()
+        return row_to_dict(result)
 
-        organizer = row_to_dict(conn.execute(
-            "SELECT * FROM organizers WHERE id = ?",
-            (CURRENT_ORGANIZER_ID,),
-        ).fetchone())
-
-        participant = row_to_dict(conn.execute(
-            "SELECT * FROM participants WHERE id = ?",
-            (CURRENT_PARTICIPANT_ID,),
-        ).fetchone())
-
-        enrollment = row_to_dict(conn.execute(
-            """
-            SELECT * FROM enrollments
-            WHERE program_id = ? AND participant_id = ?
-            """,
-            (CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
-        ).fetchone())
-
-        task_rows = conn.execute(
-            """
-            SELECT
-                pt.id AS participant_task_id,
-                pt.status,
-                pt.progress_percent AS participant_progress,
-                pt.report_required,
-                pt.soft_return_available,
-                pt.planned_for,
-                pt.completed_at,
-                t.id AS task_id,
-                t.title,
-                t.description,
-                t.task_type,
-                t.submission_mode,
-                t.points,
-                t.estimated_minutes,
-                t.scheduled_for,
-                t.soft_return_copy,
-                m.title AS module_title,
-                r.report_type,
-                r.content AS report_content,
-                r.attachment_name,
-                r.status AS report_status,
-                r.submitted_at
-            FROM participant_tasks pt
-            JOIN tasks t ON t.id = pt.task_id
-            JOIN modules m ON m.id = t.module_id
-            LEFT JOIN reports r ON r.participant_task_id = pt.id
-            WHERE pt.participant_id = ? AND t.program_id = ?
-            ORDER BY
-                CASE pt.status
-                    WHEN 'in_progress' THEN 1
-                    WHEN 'missed' THEN 2
-                    WHEN 'planned' THEN 3
-                    WHEN 'completed' THEN 4
-                    ELSE 5
-                END,
-                t.position
-            """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
-        ).fetchall()
-
-        participant_tasks = []
-        for row in task_rows:
-            card = row_to_dict(row)
-            card["badge"] = progress_badge(card["status"])
-            participant_tasks.append(card)
-
-        notifications = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT *
-            FROM notifications
-            WHERE participant_id = ? AND program_id = ?
-            ORDER BY is_read ASC, created_at DESC
-            """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
-        ).fetchall()]
-
-        leaderboard_rows = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                e.participant_id,
-                p.full_name,
-                p.avatar_bg,
-                e.progress_percent,
-                e.xp,
-                e.completed_tasks,
-                e.total_tasks,
-                e.at_risk,
-                p.last_active_at
-            FROM enrollments e
-            JOIN participants p ON p.id = e.participant_id
-            WHERE e.program_id = ?
-            ORDER BY e.xp DESC, e.progress_percent DESC, p.full_name ASC
-            """,
-            (CURRENT_PROGRAM_ID,),
-        ).fetchall()]
-        for index, row in enumerate(leaderboard_rows, start=1):
-            row["rank"] = index
-
-        top_three = leaderboard_rows[:3]
-        current_rank = next((row["rank"] for row in leaderboard_rows if row["participant_id"] == CURRENT_PARTICIPANT_ID), None)
-
-        current_team = row_to_dict(conn.execute(
-            """
-            SELECT t.*
-            FROM teams t
-            JOIN team_members tm ON tm.team_id = t.id
-            WHERE tm.participant_id = ? AND t.program_id = ?
-            """,
-            (CURRENT_PARTICIPANT_ID, CURRENT_PROGRAM_ID),
-        ).fetchone())
-
-        team_members = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                p.id,
-                p.full_name,
-                p.avatar_bg,
-                p.streak_days,
-                e.progress_percent,
-                e.xp,
-                tm.is_captain
-            FROM team_members tm
-            JOIN participants p ON p.id = tm.participant_id
-            JOIN enrollments e ON e.participant_id = p.id AND e.program_id = ?
-            WHERE tm.team_id = ?
-            ORDER BY e.xp DESC
-            """,
-            (CURRENT_PROGRAM_ID, current_team["id"]),
-        ).fetchall()]
-
-        team_xp = sum(member["xp"] for member in team_members)
-        team_done_today = sum(1 for member in team_members if member["progress_percent"] >= 75)
-
-        recent_reports = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                r.id,
-                p.full_name,
-                p.avatar_bg,
-                t.title,
-                r.report_type,
-                r.content,
-                r.status,
-                r.submitted_at
-            FROM reports r
-            JOIN participants p ON p.id = r.participant_id
-            JOIN tasks t ON t.id = r.task_id
-            JOIN participant_tasks pt ON pt.id = r.participant_task_id
-            JOIN tasks rt ON rt.id = pt.task_id
-            WHERE rt.program_id = ?
-            ORDER BY r.submitted_at DESC
-            LIMIT 6
-            """,
-            (CURRENT_PROGRAM_ID,),
-        ).fetchall()]
-
-        at_risk = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                p.id,
-                p.full_name,
-                p.avatar_bg,
-                e.progress_percent,
-                e.xp,
-                e.soft_return_count,
-                p.last_active_at
-            FROM enrollments e
-            JOIN participants p ON p.id = e.participant_id
-            WHERE e.program_id = ? AND e.at_risk = 1
-            ORDER BY p.last_active_at ASC
-            """,
-            (CURRENT_PROGRAM_ID,),
-        ).fetchall()]
-
-        metrics = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT *
-            FROM daily_metrics
-            WHERE program_id = ?
-            ORDER BY metric_date ASC
-            """,
-            (CURRENT_PROGRAM_ID,),
-        ).fetchall()]
-
-        private_challenges = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                pc.*,
-                COUNT(pcm.participant_id) AS member_count
-            FROM private_challenges pc
-            LEFT JOIN private_challenge_members pcm ON pcm.challenge_id = pc.id
-            GROUP BY pc.id
-            ORDER BY pc.id DESC
-            """,
-        ).fetchall()]
-        for challenge in private_challenges:
-            members = [row_to_dict(row) for row in conn.execute(
-                """
-                SELECT p.id, p.full_name, p.avatar_bg
-                FROM private_challenge_members pcm
-                JOIN participants p ON p.id = pcm.participant_id
-                WHERE pcm.challenge_id = ?
-                ORDER BY pcm.role DESC, p.full_name ASC
-                """,
-                (challenge["id"],),
-            ).fetchall()]
-            challenge["members"] = members
-
-        reusable_programs = [row_to_dict(row) for row in conn.execute(
-            """
-            SELECT
-                p.id,
-                p.name,
-                p.status,
-                p.start_date,
-                p.end_date,
-                COUNT(DISTINCT m.id) AS module_count,
-                COUNT(DISTINCT t.id) AS task_count
-            FROM programs p
-            LEFT JOIN modules m ON m.program_id = p.id
-            LEFT JOIN tasks t ON t.program_id = p.id
-            WHERE p.organizer_id = ?
-            GROUP BY p.id
-            ORDER BY p.id DESC
-            """,
-            (CURRENT_ORGANIZER_ID,),
-        ).fetchall()]
-
-        unread_notifications = sum(1 for item in notifications if item["is_read"] == 0)
-        reports_today = sum(1 for item in recent_reports if item["submitted_at"].startswith(str(date.today())))
-        completion_rate = round(sum(row["progress_percent"] for row in leaderboard_rows) / max(len(leaderboard_rows), 1), 1)
-        today_focus = sum(1 for task in participant_tasks if task["status"] in {"completed", "in_progress"})
-        total_focus = len(participant_tasks)
-
-        return {
-            "meta": {
-                "projectName": "GoalMate",
-                "currentDate": str(date.today()),
-                "host": f"http://{HOST}:{PORT}",
-            },
-            "program": program,
-            "organizer": organizer,
-            "participant": {
-                **participant,
-                **enrollment,
-                "rank": current_rank,
-                "shareCard": {
-                    "title": "Карточка результата",
-                    "subtitle": "Её можно использовать для вирального шеринга после прохождения потока.",
-                    "progress_percent": enrollment["progress_percent"],
-                    "xp": enrollment["xp"],
-                    "rank": current_rank,
-                    "streak_days": participant["streak_days"],
-                    "team_name": current_team["name"],
-                },
-            },
-            "participantBoard": {
-                "tasks": participant_tasks,
-                "todayFocus": today_focus,
-                "totalFocus": total_focus,
-                "missedCount": sum(1 for task in participant_tasks if task["status"] == "missed"),
-                "softReturnCount": enrollment["soft_return_count"],
-                "unreadNotifications": unread_notifications,
-            },
-            "leaderboard": {
-                "topThree": top_three,
-                "rows": leaderboard_rows,
-            },
-            "team": {
-                **current_team,
-                "xp_total": team_xp,
-                "done_today": team_done_today,
-                "member_count": len(team_members),
-                "members": team_members,
-            },
-            "notifications": notifications,
-            "organizerDashboard": {
-                "totalParticipants": len(leaderboard_rows),
-                "completionRate": completion_rate,
-                "atRiskCount": len(at_risk),
-                "reportsToday": reports_today,
-                "recentReports": recent_reports,
-                "atRiskParticipants": at_risk,
-                "hoursSavedPerWeek": 5.6,
-                "smartTriggers": [
-                    {
-                        "title": "Автоматический мягкий возврат",
-                        "description": "Срабатывает, если участник пропустил день и не открыл платформу до вечера.",
-                    },
-                    {
-                        "title": "Пинг мини-команды",
-                        "description": "Напоминает о командной ответственности, когда 75% группы уже закрыли шаг.",
-                    },
-                    {
-                        "title": "Риск выгорания",
-                        "description": "Подсвечивает участников, которые замедляются после 2-х пропусков подряд.",
-                    },
-                ],
-            },
-            "builder": {
-                "modules": get_modules_with_tasks(conn, CURRENT_PROGRAM_ID),
-                "reusablePrograms": reusable_programs,
-            },
-            "analytics": {
-                "dailyMetrics": metrics,
-                "cohorts": [
-                    {"label": "Сильный ритм", "count": sum(1 for row in leaderboard_rows if row["progress_percent"] >= 85), "tone": "success"},
-                    {"label": "Нужен nudging", "count": sum(1 for row in leaderboard_rows if 70 <= row["progress_percent"] < 85), "tone": "info"},
-                    {"label": "Высокий риск оттока", "count": len(at_risk), "tone": "warning"},
-                ],
-            },
-            "privateChallenges": private_challenges,
-        }
-
-
-def add_notification(conn: sqlite3.Connection, title: str, message: str, notification_type: str, reason: str, cta_label: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO notifications (
-            participant_id, program_id, title, message, notification_type,
-            trigger_reason, cta_label, is_read, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-        """,
-        (
-            CURRENT_PARTICIPANT_ID,
-            CURRENT_PROGRAM_ID,
-            title,
-            message,
-            notification_type,
-            reason,
-            cta_label,
-            now_iso(),
-        ),
-    )
-
-
-def refresh_progress(conn: sqlite3.Connection, participant_id: int) -> None:
-    enrollment = conn.execute(
-        """
-        SELECT completed_tasks, total_tasks
-        FROM enrollments
-        WHERE program_id = ? AND participant_id = ?
-        """,
-        (CURRENT_PROGRAM_ID, participant_id),
-    ).fetchone()
-    if enrollment is None:
-        return
-
-    total_tasks = max(enrollment["total_tasks"], 1)
-    progress = round((enrollment["completed_tasks"] / total_tasks) * 100, 1)
-    conn.execute(
-        """
-        UPDATE enrollments
-        SET progress_percent = ?
-        WHERE program_id = ? AND participant_id = ?
-        """,
-        (progress, CURRENT_PROGRAM_ID, participant_id),
-    )
-
-
-def touch_participant(conn: sqlite3.Connection, participant_id: int) -> None:
-    conn.execute(
-        "UPDATE participants SET last_active_at = ? WHERE id = ?",
-        (now_iso(), participant_id),
-    )
-
-
-def complete_task(participant_task_id: int, via_report: bool = False) -> dict:
+def create_auth_token(user_id: int) -> str:
+    token = generate_token()
+    expires_at = (datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)).isoformat(sep=" ")
     with connect_db() as conn:
-        record = conn.execute(
-            """
-            SELECT pt.*, t.points, t.title
-            FROM participant_tasks pt
-            JOIN tasks t ON t.id = pt.task_id
-            WHERE pt.id = ? AND pt.participant_id = ?
-            """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
-        ).fetchone()
-        if record is None:
-            raise ValueError("Задача не найдена")
+        conn.execute("INSERT INTO auth_tokens (user_id, token, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                     (user_id, token, expires_at, now_iso()))
+        conn.commit()
+    return token
 
-        if record["status"] != "completed":
-            conn.execute(
-                """
-                UPDATE participant_tasks
-                SET status = 'completed',
-                    progress_percent = 100,
-                    soft_return_available = 0,
-                    completed_at = ?,
-                    last_interaction_at = ?
-                WHERE id = ?
-                """,
-                (now_iso(), now_iso(), participant_task_id),
-            )
-            conn.execute(
-                """
-                UPDATE enrollments
-                SET completed_tasks = completed_tasks + 1,
-                    xp = xp + ?,
-                    at_risk = 0
-                WHERE program_id = ? AND participant_id = ?
-                """,
-                (record["points"], CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
-            )
-            conn.execute(
-                """
-                UPDATE participants
-                SET streak_days = streak_days + 1,
-                    last_active_at = ?
-                WHERE id = ?
-                """,
-                (now_iso(), CURRENT_PARTICIPANT_ID),
-            )
-            refresh_progress(conn, CURRENT_PARTICIPANT_ID)
-            if via_report:
-                add_notification(
-                    conn,
-                    "Отчёт принят",
-                    f"Задача '{record['title']}' засчитана. Прогресс обновлён автоматически.",
-                    "report",
-                    "report_accepted",
-                    "Открыть прогресс",
-                )
-            else:
-                add_notification(
-                    conn,
-                    "Шаг закрыт",
-                    f"Задача '{record['title']}' завершена. Темп удержан без лишнего давления.",
-                    "progress",
-                    "task_completed",
-                    "Посмотреть задачи",
-                )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
+def touch_user_activity(user_id: int) -> None:
+    with connect_db() as conn:
+        conn.execute("UPDATE users SET last_active_at = ? WHERE id = ?", (now_iso(), user_id))
         conn.commit()
 
-    return get_bootstrap_state()
-
-
-def soft_return_task(participant_task_id: int) -> dict:
+def check_achievement_unlocks(participant_id: int, program_id: int) -> list[dict]:
+    unlocked = []
     with connect_db() as conn:
-        record = conn.execute(
-            """
-            SELECT pt.id, t.title
-            FROM participant_tasks pt
-            JOIN tasks t ON t.id = pt.task_id
-            WHERE pt.id = ? AND pt.participant_id = ?
-            """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
-        ).fetchone()
-        if record is None:
-            raise ValueError("Задача не найдена")
-
-        conn.execute(
-            """
-            UPDATE participant_tasks
-            SET status = 'in_progress',
-                progress_percent = CASE
-                    WHEN progress_percent < 25 THEN 25
-                    ELSE progress_percent
-                END,
-                soft_return_available = 0,
-                last_interaction_at = ?
-            WHERE id = ?
-            """,
-            (now_iso(), participant_task_id),
-        )
-        conn.execute(
-            """
-            UPDATE enrollments
-            SET soft_return_count = soft_return_count + 1,
-                at_risk = 0
-            WHERE program_id = ? AND participant_id = ?
-            """,
-            (CURRENT_PROGRAM_ID, CURRENT_PARTICIPANT_ID),
-        )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
-        add_notification(
-            conn,
-            "Мягкий возврат активирован",
-            f"Задача '{record['title']}' снова в работе. Прогресс не обнулился.",
-            "soft_return",
-            "soft_return_used",
-            "Продолжить",
-        )
+        completed = conn.execute("SELECT COUNT(*) as cnt FROM lesson_progress WHERE participant_id = ? AND status = 'completed'", (participant_id,)).fetchone()["cnt"]
+        if completed >= 1:
+            achievements = [
+                ("first_step", "Первый шаг", "Вы прошли свой первый урок! 🎉", "🏆"),
+                ("week_warrior", "Недельный воин", "7 дней активности подряд! 🔥", "⚡"),
+                ("top_rater", "Эксперт", "Вы поставили 10 оценок! ⭐", "🌟"),
+                ("commentator", "Комментатор", "Вы оставили 5 комментариев! 💬", "💭"),
+            ]
+            for key, title, desc, icon in achievements:
+                existing = conn.execute("SELECT id FROM achievements WHERE participant_id = ? AND achievement_key = ?", (participant_id, key)).fetchone()
+                if not existing:
+                    condition = False
+                    if key == "first_step": condition = completed >= 1
+                    elif key == "week_warrior": condition = completed >= 7
+                    elif key == "top_rater": condition = conn.execute("SELECT COUNT(*) as c FROM ratings WHERE participant_id = ?", (participant_id,)).fetchone()["c"] >= 10
+                    elif key == "commentator": condition = conn.execute("SELECT COUNT(*) as c FROM comments WHERE participant_id = ?", (participant_id,)).fetchone()["c"] >= 5
+                    
+                    if condition:
+                        conn.execute("INSERT INTO achievements (participant_id, achievement_key, title, description, icon, unlocked_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                     (participant_id, key, title, desc, icon, now_iso()))
+                        unlocked.append({"key": key, "title": title, "description": desc, "icon": icon})
         conn.commit()
+    return unlocked
 
-    return get_bootstrap_state()
-
-
-def submit_report(payload: dict) -> dict:
-    participant_task_id = int(payload.get("participantTaskId", 0))
-    report_type = str(payload.get("reportType", "text")).strip() or "text"
-    content = str(payload.get("content", "")).strip()
-    attachment_name = str(payload.get("attachmentName", "")).strip() or None
-
-    if not participant_task_id:
-        raise ValueError("Нужен participantTaskId")
-    if not content:
-        raise ValueError("Добавь короткий текст отчёта")
-
+# === API: Авторизация ===
+def register_user(payload: dict) -> dict:
+    email = payload.get("email", "").strip().lower()
+    password = payload.get("password", "").strip()
+    full_name = payload.get("full_name", "").strip()
+    role = payload.get("role", "").strip()
+    if not all([email, password, full_name, role]) or role not in ("creator", "participant"):
+        raise ValueError("Заполните все поля корректно")
+    if len(password) < 6: raise ValueError("Пароль должен быть не менее 6 символов")
     with connect_db() as conn:
-        task = conn.execute(
-            """
-            SELECT pt.id, pt.task_id, t.title
-            FROM participant_tasks pt
-            JOIN tasks t ON t.id = pt.task_id
-            WHERE pt.id = ? AND pt.participant_id = ?
-            """,
-            (participant_task_id, CURRENT_PARTICIPANT_ID),
-        ).fetchone()
-        if task is None:
-            raise ValueError("Задача для отчёта не найдена")
-
-        existing = conn.execute(
-            "SELECT id FROM reports WHERE participant_task_id = ?",
-            (participant_task_id,),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """
-                UPDATE reports
-                SET report_type = ?, content = ?, attachment_name = ?, status = 'accepted', submitted_at = ?
-                WHERE participant_task_id = ?
-                """,
-                (report_type, content, attachment_name, now_iso(), participant_task_id),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO reports (
-                    participant_task_id, participant_id, task_id, report_type,
-                    content, attachment_name, status, submitted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'accepted', ?)
-                """,
-                (
-                    participant_task_id,
-                    CURRENT_PARTICIPANT_ID,
-                    task["task_id"],
-                    report_type,
-                    content,
-                    attachment_name,
-                    now_iso(),
-                ),
-            )
-        touch_participant(conn, CURRENT_PARTICIPANT_ID)
+        if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+            raise ValueError("Пользователь с таким email уже существует")
+        pwd_hash, salt = hash_password(password)
+        cursor = conn.execute("INSERT INTO users (email, password_hash, full_name, role, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?)",
+                              (email, f"{salt}:{pwd_hash}", full_name, role, now_iso(), now_iso()))
+        user_id = cursor.lastrowid
         conn.commit()
+    return {"user_id": user_id, "token": create_auth_token(user_id), "role": role, "full_name": full_name}
 
-    return complete_task(participant_task_id, via_report=True)
-
-
-def mark_notification_read(notification_id: int) -> dict:
+def login_user(payload: dict) -> dict:
+    email = payload.get("email", "").strip().lower()
+    password = payload.get("password", "").strip()
+    if not email or not password: raise ValueError("Введите email и пароль")
     with connect_db() as conn:
-        conn.execute(
-            """
-            UPDATE notifications
-            SET is_read = 1
-            WHERE id = ? AND participant_id = ?
-            """,
-            (notification_id, CURRENT_PARTICIPANT_ID),
-        )
-        conn.commit()
-    return get_bootstrap_state()
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if not user: raise ValueError("Неверный email или пароль")
+        stored = user["password_hash"]
+        salt, stored_hash = stored.split(":", 1) if ":" in stored else ("", stored)
+        if not verify_password(password, stored_hash, salt): raise ValueError("Неверный email или пароль")
+    token = create_auth_token(user["id"])
+    touch_user_activity(user["id"])
+    return {"user_id": user["id"], "token": token, "role": user["role"], "full_name": user["full_name"], "avatar_bg": user["avatar_bg"]}
 
-
-def create_module(payload: dict) -> dict:
-    title = str(payload.get("title", "")).strip()
-    description = str(payload.get("description", "")).strip()
-    week_label = str(payload.get("weekLabel", "")).strip() or "Новая неделя"
-    if not title:
-        raise ValueError("Название модуля обязательно")
-
+def logout_user(token: str) -> bool:
     with connect_db() as conn:
-        position = conn.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM modules WHERE program_id = ?",
-            (CURRENT_PROGRAM_ID,),
-        ).fetchone()["next_position"]
-        conn.execute(
-            """
-            INSERT INTO modules (program_id, title, description, week_label, position)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (CURRENT_PROGRAM_ID, title, description or "Новый блок в конструкторе GoalMate.", week_label, position),
-        )
+        conn.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
         conn.commit()
-    return get_bootstrap_state()
+    return True
 
-
-def create_task(payload: dict) -> dict:
-    module_id = int(payload.get("moduleId", 0))
-    title = str(payload.get("title", "")).strip()
-    description = str(payload.get("description", "")).strip()
-    task_type = str(payload.get("taskType", "custom")).strip() or "custom"
-    submission_mode = str(payload.get("submissionMode", "text")).strip() or "text"
-    points = int(payload.get("points", 100))
-    estimated_minutes = int(payload.get("estimatedMinutes", 15))
-    scheduled_for = str(payload.get("scheduledFor", str(date.today() + timedelta(days=1))))
-    soft_return_copy = str(payload.get("softReturnCopy", "")).strip() or "Можно вернуться укороченной версией шага."
-    if not module_id or not title:
-        raise ValueError("Нужны модуль и название задания")
-
+# === API: Марафоны ===
+def create_program(creator_id: int, payload: dict) -> dict:
+    name = payload.get("name", "").strip()
+    description = payload.get("description", "").strip()
+    goal_text = payload.get("goal_text", "").strip()
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    if not all([name, description, goal_text, start_date, end_date]): raise ValueError("Заполните все обязательные поля")
+    slug = name.lower().replace(" ", "-") + "-" + secrets.token_hex(2)
     with connect_db() as conn:
-        position = conn.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM tasks WHERE module_id = ?",
-            (module_id,),
-        ).fetchone()["next_position"]
-        cursor = conn.execute(
-            """
-            INSERT INTO tasks (
-                program_id, module_id, title, description, task_type, submission_mode,
-                points, estimated_minutes, scheduled_for, position, soft_return_copy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                CURRENT_PROGRAM_ID,
-                module_id,
-                title,
-                description or "Новое задание из конструктора GoalMate.",
-                task_type,
-                submission_mode,
-                points,
-                estimated_minutes,
-                scheduled_for,
-                position,
-                soft_return_copy,
-            ),
-        )
-        new_task_id = cursor.lastrowid
-
-        participants = [row["participant_id"] for row in conn.execute(
-            "SELECT participant_id FROM enrollments WHERE program_id = ?",
-            (CURRENT_PROGRAM_ID,),
-        ).fetchall()]
-        for participant_id in participants:
-            conn.execute(
-                """
-                INSERT INTO participant_tasks (
-                    task_id, participant_id, status, progress_percent, report_required,
-                    soft_return_available, planned_for, completed_at, last_interaction_at
-                ) VALUES (?, ?, 'planned', 0, ?, 1, ?, NULL, ?)
-                """,
-                (
-                    new_task_id,
-                    participant_id,
-                    1 if submission_mode in {"text", "photo", "voice"} else 0,
-                    scheduled_for,
-                    now_iso(),
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE enrollments
-                SET total_tasks = total_tasks + 1
-                WHERE program_id = ? AND participant_id = ?
-                """,
-                (CURRENT_PROGRAM_ID, participant_id),
-            )
-            refresh_progress(conn, participant_id)
+        cursor = conn.execute("INSERT INTO programs (creator_id, name, slug, description, goal_text, start_date, end_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
+                              (creator_id, name, slug, description, goal_text, start_date, end_date, now_iso(), now_iso()))
+        program_id = cursor.lastrowid
+        code = generate_invitation_code()
+        conn.execute("INSERT INTO invitation_codes (program_id, code, max_uses, created_at) VALUES (?, ?, 100, ?)", (program_id, code, now_iso()))
         conn.commit()
-    return get_bootstrap_state()
+    return {"program_id": program_id, "slug": slug, "invitation_code": code}
 
-
-def duplicate_program(program_id: int) -> dict:
+def get_creator_programs(creator_id: int) -> list[dict]:
     with connect_db() as conn:
-        source_program = conn.execute(
-            "SELECT * FROM programs WHERE id = ? AND organizer_id = ?",
-            (program_id, CURRENT_ORGANIZER_ID),
-        ).fetchone()
-        if source_program is None:
-            raise ValueError("Программа для копирования не найдена")
+        rows = conn.execute("""
+            SELECT p.*, COUNT(DISTINCT e.id) as enrolled_count, COUNT(DISTINCT m.id) as modules_count, COUNT(DISTINCT l.id) as lessons_count
+            FROM programs p LEFT JOIN enrollments e ON e.program_id = p.id
+            LEFT JOIN modules m ON m.program_id = p.id LEFT JOIN lessons l ON l.module_id = m.id
+            WHERE p.creator_id = ? GROUP BY p.id ORDER BY p.updated_at DESC
+        """, (creator_id,)).fetchall()
+        return [row_to_dict(r) for r in rows]
 
-        new_name = f"{source_program['name']} (копия)"
-        new_slug = f"{source_program['slug']}-copy-{int(datetime.now().timestamp())}"
-        cursor = conn.execute(
-            """
-            INSERT INTO programs (
-                organizer_id, source_program_id, name, slug, description, audience,
-                start_date, end_date, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')
-            """,
-            (
-                CURRENT_ORGANIZER_ID,
-                source_program["id"],
-                new_name,
-                new_slug,
-                source_program["description"],
-                source_program["audience"],
-                str(date.today()),
-                str(date.today() + timedelta(days=30)),
-            ),
-        )
-        new_program_id = cursor.lastrowid
-
-        module_map: dict[int, int] = {}
-        for module in conn.execute(
-            "SELECT * FROM modules WHERE program_id = ? ORDER BY position",
-            (program_id,),
-        ).fetchall():
-            module_cursor = conn.execute(
-                """
-                INSERT INTO modules (program_id, title, description, week_label, position)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (new_program_id, module["title"], module["description"], module["week_label"], module["position"]),
-            )
-            module_map[module["id"]] = module_cursor.lastrowid
-
-        for task in conn.execute(
-            "SELECT * FROM tasks WHERE program_id = ? ORDER BY position",
-            (program_id,),
-        ).fetchall():
-            conn.execute(
-                """
-                INSERT INTO tasks (
-                    program_id, module_id, title, description, task_type, submission_mode,
-                    points, estimated_minutes, scheduled_for, position, soft_return_copy
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_program_id,
-                    module_map[task["module_id"]],
-                    task["title"],
-                    task["description"],
-                    task["task_type"],
-                    task["submission_mode"],
-                    task["points"],
-                    task["estimated_minutes"],
-                    task["scheduled_for"],
-                    task["position"],
-                    task["soft_return_copy"],
-                ),
-            )
-        conn.commit()
-    return get_bootstrap_state()
-
-
-def update_branding(payload: dict) -> dict:
-    brand_name = str(payload.get("brandName", "")).strip()
-    primary_color = str(payload.get("primaryColor", "")).strip()
-    accent_color = str(payload.get("accentColor", "")).strip()
-    support_email = str(payload.get("supportEmail", "")).strip()
-
-    if not all([brand_name, primary_color, accent_color, support_email]):
-        raise ValueError("Заполни все поля брендинга")
-
+def update_program(program_id: int, creator_id: int, payload: dict) -> dict:
     with connect_db() as conn:
-        conn.execute(
-            """
-            UPDATE organizers
-            SET brand_name = ?, primary_color = ?, accent_color = ?, support_email = ?
-            WHERE id = ?
-            """,
-            (brand_name, primary_color, accent_color, support_email, CURRENT_ORGANIZER_ID),
-        )
+        if not conn.execute("SELECT id FROM programs WHERE id = ? AND creator_id = ?", (program_id, creator_id)).fetchone():
+            raise ValueError("Марафон не найден")
+        updates, params = [], []
+        for field in ["name", "description", "goal_text", "start_date", "end_date", "status", "cover_image"]:
+            if field in payload:
+                updates.append(f"{field} = ?")
+                params.append(payload[field])
+        updates.append("updated_at = ?"); params.append(now_iso())
+        params.append(program_id)
+        conn.execute(f"UPDATE programs SET {', '.join(updates)} WHERE id = ?", params)
         conn.commit()
-    return get_bootstrap_state()
+        return row_to_dict(conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone())
 
-
-def create_private_challenge(payload: dict) -> dict:
-    name = str(payload.get("name", "")).strip()
-    goal_text = str(payload.get("goalText", "")).strip()
-    description = str(payload.get("description", "")).strip()
-    target_per_week = int(payload.get("targetPerWeek", 3))
-    target_team_size = int(payload.get("targetTeamSize", 4))
-    duration_weeks = int(payload.get("durationWeeks", 3))
-
-    if not name or not goal_text:
-        raise ValueError("Нужны название и цель челленджа")
-
-    start_date = date.today()
-    end_date = start_date + timedelta(days=duration_weeks * 7)
+def generate_invitation_code_api(program_id: int, creator_id: int, payload: dict) -> dict:
+    max_uses = int(payload.get("max_uses", 1))
+    expires_at = payload.get("expires_at")
     with connect_db() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO private_challenges (
-                creator_participant_id, name, description, goal_text, target_per_week,
-                target_team_size, start_date, end_date, status, visibility
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'friends')
-            """,
-            (
-                CURRENT_PARTICIPANT_ID,
-                name,
-                description or "Новый приватный челлендж на базе GoalMate.",
-                goal_text,
-                target_per_week,
-                target_team_size,
-                str(start_date),
-                str(end_date),
-            ),
-        )
-        challenge_id = cursor.lastrowid
-        conn.execute(
-            """
-            INSERT INTO private_challenge_members (challenge_id, participant_id, role, joined_at)
-            VALUES (?, ?, 'creator', ?)
-            """,
-            (challenge_id, CURRENT_PARTICIPANT_ID, now_iso()),
-        )
+        if not conn.execute("SELECT id FROM programs WHERE id = ? AND creator_id = ?", (program_id, creator_id)).fetchone():
+            raise ValueError("Марафон не найден")
+        code = generate_invitation_code()
+        conn.execute("INSERT INTO invitation_codes (program_id, code, max_uses, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (program_id, code, max_uses, expires_at, now_iso()))
         conn.commit()
-    return get_bootstrap_state()
+        return {"code": code, "max_uses": max_uses, "expires_at": expires_at}
 
+def validate_invitation_code(code: str, participant_id: int) -> dict:
+    code = code.strip().upper()
+    with connect_db() as conn:
+        invitation = conn.execute("""
+            SELECT ic.*, p.id as program_id, p.name as program_name, p.creator_id
+            FROM invitation_codes ic JOIN programs p ON p.id = ic.program_id
+            WHERE ic.code = ? AND ic.is_active = 1 AND (ic.expires_at IS NULL OR ic.expires_at > ?) AND ic.used_count < ic.max_uses
+        """, (code, now_iso())).fetchone()
+        if not invitation: raise ValueError("Недействительный или истёкший код приглашения")
+        if conn.execute("SELECT id FROM enrollments WHERE program_id = ? AND participant_id = ?", (invitation["program_id"], participant_id)).fetchone():
+            raise ValueError("Вы уже присоединены к этому марафону")
+        
+        conn.execute("UPDATE invitation_codes SET used_count = used_count + 1 WHERE id = ?", (invitation["id"],))
+        conn.execute("INSERT INTO enrollments (program_id, participant_id, invitation_code_id, joined_at, last_activity_at) VALUES (?, ?, ?, ?, ?)",
+                     (invitation["program_id"], participant_id, invitation["id"], now_iso(), now_iso()))
+        
+        lessons = conn.execute("""
+            SELECT l.id, m.unlock_date, l.unlock_date as lesson_unlock FROM lessons l
+            JOIN modules m ON m.id = l.module_id WHERE m.program_id = ?
+        """, (invitation["program_id"],)).fetchall()
+        now = now_iso()
+        for lesson in lessons:
+            status = "locked"
+            if (not lesson["unlock_date"] or lesson["unlock_date"] <= now) and (not lesson["lesson_unlock"] or lesson["lesson_unlock"] <= now):
+                status = "available"
+            conn.execute("INSERT INTO lesson_progress (lesson_id, participant_id, status, last_interaction_at) VALUES (?, ?, ?, ?)",
+                         (lesson["id"], participant_id, status, now))
+        
+        conn.execute("UPDATE enrollments SET total_lessons = ? WHERE program_id = ? AND participant_id = ?",
+                     (len(lessons), invitation["program_id"], participant_id))
+        conn.commit()
+        return {"program_id": invitation["program_id"], "program_name": invitation["program_name"], "enrolled": True}
 
-def reset_demo() -> dict:
-    init_db(force_reset=True)
-    return get_bootstrap_state()
+# === API: Модули и Уроки (FULL CRUD) ===
+def get_program_modules(program_id: int, creator_id: int) -> list[dict]:
+    with connect_db() as conn:
+        if not conn.execute("SELECT id FROM programs WHERE id = ? AND creator_id = ?", (program_id, creator_id)).fetchone():
+            raise ValueError("Доступ запрещен")
+        modules = []
+        for mod in conn.execute("SELECT * FROM modules WHERE program_id = ? ORDER BY position", (program_id,)).fetchall():
+            m = row_to_dict(mod)
+            m["lessons"] = [row_to_dict(l) for l in conn.execute("SELECT * FROM lessons WHERE module_id = ? ORDER BY position", (m["id"],)).fetchall()]
+            modules.append(m)
+        return modules
 
+def create_module(program_id: int, creator_id: int, payload: dict) -> dict:
+    title = payload.get("title", "").strip()
+    if not title: raise ValueError("Название обязательно")
+    with connect_db() as conn:
+        if not conn.execute("SELECT id FROM programs WHERE id = ? AND creator_id = ?", (program_id, creator_id)).fetchone(): raise ValueError("Марафон не найден")
+        pos = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM modules WHERE program_id = ?", (program_id,)).fetchone()[0]
+        cursor = conn.execute("INSERT INTO modules (program_id, title, description, position, unlock_date, deadline, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (program_id, title, payload.get("description",""), pos, payload.get("unlock_date"), payload.get("deadline"), now_iso()))
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM modules WHERE id = ?", (cursor.lastrowid,)).fetchone())
 
+def update_module(module_id: int, creator_id: int, payload: dict) -> dict:
+    with connect_db() as conn:
+        if not conn.execute("SELECT m.id FROM modules m JOIN programs p ON p.id=m.program_id WHERE m.id=? AND p.creator_id=?", (module_id, creator_id)).fetchone():
+            raise ValueError("Модуль не найден")
+        updates, params = [], []
+        for field in ["title", "description", "unlock_date", "deadline"]:
+            if field in payload:
+                updates.append(f"{field} = ?")
+                params.append(payload[field])
+        params.append(module_id)
+        conn.execute(f"UPDATE modules SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM modules WHERE id = ?", (module_id,)).fetchone())
+
+def delete_module(module_id: int, creator_id: int) -> dict:
+    with connect_db() as conn:
+        if not conn.execute("SELECT m.id FROM modules m JOIN programs p ON p.id=m.program_id WHERE m.id=? AND p.creator_id=?", (module_id, creator_id)).fetchone():
+            raise ValueError("Модуль не найден")
+        conn.execute("DELETE FROM modules WHERE id = ?", (module_id,))
+        conn.commit()
+        return {"deleted": True, "id": module_id}
+
+def create_lesson(module_id: int, creator_id: int, payload: dict) -> dict:
+    title = payload.get("title", "").strip()
+    if not title: raise ValueError("Название урока обязательно")
+    with connect_db() as conn:
+        mod = conn.execute("SELECT m.id, m.program_id FROM modules m JOIN programs p ON p.id=m.program_id WHERE m.id=? AND p.creator_id=?", (module_id, creator_id)).fetchone()
+        if not mod: raise ValueError("Модуль не найден")
+        pos = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM lessons WHERE module_id = ?", (module_id,)).fetchone()[0]
+        cursor = conn.execute("INSERT INTO lessons (module_id, title, content_html, position, unlock_date, deadline, points, estimated_minutes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (module_id, title, payload.get("content_html",""), pos, payload.get("unlock_date"), payload.get("deadline"), int(payload.get("points",100)), int(payload.get("estimated_minutes",15)), now_iso()))
+        
+        participants = conn.execute("SELECT participant_id FROM enrollments WHERE program_id = ?", (mod["program_id"],)).fetchall()
+        for p in participants:
+            status = "available" if (not payload.get("unlock_date") or payload.get("unlock_date") <= now_iso()) else "locked"
+            conn.execute("INSERT OR IGNORE INTO lesson_progress (lesson_id, participant_id, status, last_interaction_at) VALUES (?, ?, ?, ?)",
+                         (cursor.lastrowid, p["participant_id"], status, now_iso()))
+            conn.execute("UPDATE enrollments SET total_lessons = total_lessons + 1 WHERE program_id = ? AND participant_id = ?", (mod["program_id"], p["participant_id"]))
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM lessons WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+def update_lesson(lesson_id: int, creator_id: int, payload: dict) -> dict:
+    with connect_db() as conn:
+        if not conn.execute("SELECT l.id FROM lessons l JOIN modules m ON l.module_id=m.id JOIN programs p ON m.program_id=p.id WHERE l.id=? AND p.creator_id=?", (lesson_id, creator_id)).fetchone():
+            raise ValueError("Урок не найден")
+        updates, params = [], []
+        for field in ["title", "content_html", "unlock_date", "deadline", "points", "estimated_minutes"]:
+            if field in payload:
+                updates.append(f"{field} = ?")
+                params.append(payload[field] if field not in ["points", "estimated_minutes"] else int(payload[field]))
+        params.append(lesson_id)
+        conn.execute(f"UPDATE lessons SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM lessons WHERE id = ?", (lesson_id,)).fetchone())
+
+def delete_lesson(lesson_id: int, creator_id: int) -> dict:
+    with connect_db() as conn:
+        if not conn.execute("SELECT l.id FROM lessons l JOIN modules m ON l.module_id=m.id JOIN programs p ON m.program_id=p.id WHERE l.id=? AND p.creator_id=?", (lesson_id, creator_id)).fetchone():
+            raise ValueError("Урок не найден")
+        conn.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
+        conn.commit()
+        return {"deleted": True, "id": lesson_id}
+
+def upload_attachment(lesson_id: int, creator_id: int, filename: str, content_b64: str, mime_type: str) -> dict:
+    try: file_content = base64.b64decode(content_b64.split(",")[1] if "," in content_b64 else content_b64)
+    except Exception: raise ValueError("Некорректные данные файла")
+    allowed = {"application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "audio/mpeg", "text/plain"}
+    if mime_type not in allowed: raise ValueError("Неподдерживаемый формат")
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
+    file_path = UPLOADS_DIR / f"{lesson_id}_{safe_name}"
+    file_path.write_bytes(file_content)
+    with connect_db() as conn:
+        if not conn.execute("SELECT l.id FROM lessons l JOIN modules m ON l.module_id=m.id JOIN programs p ON p.id=m.program_id WHERE l.id=? AND p.creator_id=?", (lesson_id, creator_id)).fetchone():
+            raise ValueError("Урок не найден")
+        cursor = conn.execute("INSERT INTO attachments (lesson_id, filename, original_name, mime_type, size_bytes, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                              (lesson_id, safe_name, filename, mime_type, len(file_content), now_iso()))
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM attachments WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+# === API: Участник ===
+def get_participant_programs(participant_id: int) -> list[dict]:
+    with connect_db() as conn:
+        rows = conn.execute("""
+            SELECT p.*, e.progress_percent, e.xp, e.completed_lessons, e.total_lessons, e.streak_days, e.joined_at, ic.code as invitation_code
+            FROM enrollments e JOIN programs p ON p.id = e.program_id LEFT JOIN invitation_codes ic ON ic.id = e.invitation_code_id
+            WHERE e.participant_id = ? ORDER BY e.last_activity_at DESC
+        """, (participant_id,)).fetchall()
+        return [row_to_dict(r) for r in rows]
+
+def get_program_structure(program_id: int, participant_id: int) -> dict:
+    with connect_db() as conn:
+        program = row_to_dict(conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone())
+        if not program: raise ValueError("Марафон не найден")
+        enrolled = conn.execute("SELECT * FROM enrollments WHERE program_id = ? AND participant_id = ?", (program_id, participant_id)).fetchone()
+        if not enrolled: raise ValueError("Вы не присоединены к этому марафону")
+        
+        now = now_iso()
+        modules = []
+        for mod in conn.execute("SELECT * FROM modules WHERE program_id = ? ORDER BY position", (program_id,)).fetchall():
+            module = row_to_dict(mod)
+            module["status"] = "locked" if (module["unlock_date"] and module["unlock_date"] > now) else "available"
+            lessons = []
+            for lesson in conn.execute("""
+                SELECT l.*, lp.status as progress_status, lp.progress_percent, lp.completed_at,
+                       (SELECT AVG(r.rating) FROM ratings r WHERE r.lesson_id = l.id) as avg_rating,
+                       (SELECT COUNT(*) FROM ratings r WHERE r.lesson_id = l.id) as rating_count,
+                       (SELECT COUNT(*) FROM comments c WHERE c.lesson_id = l.id) as comments_count
+                FROM lessons l LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.participant_id = ?
+                WHERE l.module_id = ? ORDER BY l.position
+            """, (participant_id, module["id"])).fetchall():
+                l = row_to_dict(lesson)
+                if module["status"] == "locked": l["status"] = "locked"
+                elif l["unlock_date"] and l["unlock_date"] > now: l["status"] = "locked"
+                elif l["deadline"] and l["deadline"] < now and l["progress_status"] != "completed": l["status"] = "expired"
+                else: l["status"] = l["progress_status"] or "available"
+                
+                l["attachments"] = [row_to_dict(a) for a in conn.execute("SELECT * FROM attachments WHERE lesson_id = ?", (l["id"],)).fetchall()]
+                l["comments"] = [row_to_dict(c) for c in conn.execute("""
+                    SELECT c.*, u.full_name, u.avatar_bg FROM comments c JOIN users u ON u.id = c.participant_id
+                    WHERE c.lesson_id = ? ORDER BY c.created_at DESC
+                """, (l["id"],)).fetchall()]
+                my_rating = conn.execute("SELECT rating FROM ratings WHERE lesson_id = ? AND participant_id = ?", (l["id"], participant_id)).fetchone()
+                l["my_rating"] = my_rating["rating"] if my_rating else None
+                lessons.append(l)
+            module["lessons"] = lessons
+            modules.append(module)
+        
+        stats = row_to_dict(conn.execute("""
+            SELECT COUNT(CASE WHEN lp.status = 'completed' THEN 1 END) as completed,
+                   COUNT(CASE WHEN lp.status = 'in_progress' THEN 1 END) as in_progress,
+                   SUM(l.points) FILTER (WHERE lp.status = 'completed') as earned_xp
+            FROM lessons l LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.participant_id = ?
+            WHERE l.module_id IN (SELECT id FROM modules WHERE program_id = ?)
+        """, (participant_id, program_id)).fetchone())
+        
+        achievements = [row_to_dict(a) for a in conn.execute("SELECT * FROM achievements WHERE participant_id = ? ORDER BY unlocked_at DESC", (participant_id,)).fetchall()]
+        return {"program": program, "modules": modules, "stats": stats or {"completed": 0, "in_progress": 0, "earned_xp": 0}, "achievements": achievements, "progress": enrolled["progress_percent"]}
+
+def update_lesson_progress(lesson_id: int, participant_id: int, status: str, progress: float = None) -> dict:
+    if status not in ("available", "in_progress", "completed"): raise ValueError("Недопустимый статус")
+    with connect_db() as conn:
+        access = conn.execute("""
+            SELECT l.id, m.program_id, e.id as enrollment_id FROM lessons l
+            JOIN modules m ON m.id = l.module_id JOIN enrollments e ON e.program_id = m.program_id
+            WHERE l.id = ? AND e.participant_id = ? AND (l.unlock_date IS NULL OR l.unlock_date <= ?) AND (m.unlock_date IS NULL OR m.unlock_date <= ?)
+        """, (lesson_id, participant_id, now_iso(), now_iso())).fetchone()
+        if not access: raise ValueError("Урок недоступен")
+        
+        updates, params = ["status = ?", "last_interaction_at = ?"], [status, now_iso()]
+        if progress is not None: updates.append("progress_percent = ?"); params.append(min(100, max(0, progress)))
+        if status == "completed":
+            updates.append("completed_at = ?"); params.append(now_iso())
+            lesson = conn.execute("SELECT points FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+            conn.execute("""
+                UPDATE enrollments SET completed_lessons = completed_lessons + 1, xp = xp + ?,
+                progress_percent = ROUND(100.0 * completed_lessons / NULLIF(total_lessons, 1), 1),
+                streak_days = streak_days + 1, last_activity_at = ? WHERE enrollment_id = ?
+            """, (lesson["points"], now_iso(), access["enrollment_id"]))
+            check_achievement_unlocks(participant_id, access["program_id"])
+        params.extend([lesson_id, participant_id])
+        conn.execute(f"UPDATE lesson_progress SET {', '.join(updates)} WHERE lesson_id = ? AND participant_id = ?", params)
+        conn.commit()
+        return {"status": status, "progress": progress}
+
+def add_comment(lesson_id: int, participant_id: int, content: str) -> dict:
+    content = content.strip()
+    if not content or len(content) > 2000: raise ValueError("Комментарий от 1 до 2000 символов")
+    with connect_db() as conn:
+        if not conn.execute("SELECT l.id FROM lessons l JOIN modules m ON l.module_id=m.id JOIN enrollments e ON e.program_id=m.program_id WHERE l.id=? AND e.participant_id=?", (lesson_id, participant_id)).fetchone():
+            raise ValueError("Доступ запрещён")
+        cursor = conn.execute("INSERT INTO comments (lesson_id, participant_id, content, created_at) VALUES (?, ?, ?, ?)", (lesson_id, participant_id, content, now_iso()))
+        check_achievement_unlocks(participant_id, None)
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM comments WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+def add_rating(lesson_id: int, participant_id: int, rating: int) -> dict:
+    if rating not in range(1, 6): raise ValueError("Оценка от 1 до 5")
+    with connect_db() as conn:
+        if not conn.execute("SELECT l.id FROM lessons l JOIN modules m ON l.module_id=m.id JOIN enrollments e ON e.program_id=m.program_id WHERE l.id=? AND e.participant_id=?", (lesson_id, participant_id)).fetchone():
+            raise ValueError("Доступ запрещён")
+        conn.execute("""
+            INSERT INTO ratings (lesson_id, participant_id, rating, created_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(lesson_id, participant_id) DO UPDATE SET rating = ?, updated_at = ?
+        """, (lesson_id, participant_id, rating, now_iso(), rating, now_iso()))
+        check_achievement_unlocks(participant_id, None)
+        conn.commit()
+        return {"rating": rating, "lesson_id": lesson_id}
+
+def get_participant_dashboard(participant_id: int) -> dict:
+    with connect_db() as conn:
+        user = row_to_dict(conn.execute("SELECT * FROM users WHERE id = ?", (participant_id,)).fetchone())
+        stats = row_to_dict(conn.execute("""
+            SELECT COUNT(DISTINCT e.program_id) as programs_joined, SUM(e.completed_lessons) as total_completed,
+                   SUM(e.xp) as total_xp, MAX(e.streak_days) as best_streak, COUNT(DISTINCT a.id) as achievements_count
+            FROM enrollments e LEFT JOIN achievements a ON a.participant_id = e.participant_id WHERE e.participant_id = ?
+        """, (participant_id,)).fetchone())
+        recent = [row_to_dict(r) for r in conn.execute("""
+            SELECT p.name as program_name, l.title as lesson_title, lp.completed_at, lp.status
+            FROM lesson_progress lp JOIN lessons l ON l.id = lp.lesson_id JOIN modules m ON m.id = l.module_id
+            JOIN programs p ON p.id = m.program_id WHERE lp.participant_id = ? AND lp.status = 'completed'
+            ORDER BY lp.completed_at DESC LIMIT 5
+        """, (participant_id,)).fetchall()]
+        achievements = [row_to_dict(a) for a in conn.execute("SELECT * FROM achievements WHERE participant_id = ? ORDER BY unlocked_at DESC", (participant_id,)).fetchall()]
+        active_programs = [row_to_dict(r) for r in conn.execute("""
+            SELECT p.id, p.name, p.cover_image, e.progress_percent, e.xp, e.streak_days
+            FROM enrollments e JOIN programs p ON p.id = e.program_id
+            WHERE e.participant_id = ? AND p.status = 'active' ORDER BY e.last_activity_at DESC
+        """, (participant_id,)).fetchall()]
+        return {"user": user, "stats": stats or {}, "recent": recent, "achievements": achievements, "active_programs": active_programs}
+
+def get_program_analytics(program_id: int, creator_id: int) -> dict:
+    with connect_db() as conn:
+        program = conn.execute("SELECT * FROM programs WHERE id = ? AND creator_id = ?", (program_id, creator_id)).fetchone()
+        if not program: raise ValueError("Марафон не найден")
+        stats = row_to_dict(conn.execute("""
+            SELECT COUNT(DISTINCT e.participant_id) as total_participants, ROUND(AVG(e.progress_percent), 1) as avg_progress,
+                   COUNT(CASE WHEN e.last_activity_at >= datetime('now', '-7 days') THEN 1 END) as active_week,
+                   SUM(e.xp) as total_xp, COUNT(DISTINCT CASE WHEN lp.status = 'completed' THEN lp.id END) as lessons_completed
+            FROM enrollments e LEFT JOIN lesson_progress lp ON lp.enrollment_id = e.id WHERE e.program_id = ?
+        """, (program_id,)).fetchone())
+        daily = [row_to_dict(r) for r in conn.execute("""
+            SELECT metric_date, active_participants, lessons_completed, avg_rating FROM daily_metrics
+            WHERE program_id = ? AND metric_date >= date('now', '-14 days') ORDER BY metric_date
+        """, (program_id,)).fetchall()]
+        top_participants = [row_to_dict(r) for r in conn.execute("""
+            SELECT u.full_name, u.avatar_bg, e.progress_percent, e.xp, e.streak_days
+            FROM enrollments e JOIN users u ON u.id = e.participant_id WHERE e.program_id = ?
+            ORDER BY e.xp DESC, e.progress_percent DESC LIMIT 10
+        """, (program_id,)).fetchall()]
+        lesson_ratings = [row_to_dict(r) for r in conn.execute("""
+            SELECT l.title, AVG(r.rating) as avg_rating, COUNT(r.id) as ratings_count
+            FROM lessons l JOIN modules m ON m.id = l.module_id LEFT JOIN ratings r ON r.lesson_id = l.id
+            WHERE m.program_id = ? GROUP BY l.id HAVING COUNT(r.id) > 0 ORDER BY avg_rating DESC
+        """, (program_id,)).fetchall()]
+        return {"program": row_to_dict(program), "stats": stats or {}, "daily": daily, "top_participants": top_participants, "lesson_ratings": lesson_ratings}
+
+# === HTTP Handler ===
 class GoalMateHandler(BaseHTTPRequestHandler):
-    def log_message(self, format: str, *args) -> None:
-        return
-
-    def head_response(self, status: int, content_type: str = "application/json; charset=utf-8", content_length: int = 0) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(content_length))
-        self.end_headers()
-
+    def log_message(self, format: str, *args) -> None: pass
+    
     def send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
-
+    
     def read_json_body(self) -> dict:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length == 0:
-            return {}
-        raw_body = self.rfile.read(content_length)
-        return json.loads(raw_body.decode("utf-8"))
+        length = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+    
+    def get_auth_token(self) -> str | None:
+        auth = self.headers.get("Authorization", "")
+        return auth.replace("Bearer ", "") if auth.startswith("Bearer ") else None
+    
+    def require_auth(self, roles: list[str] = None) -> dict:
+        token = self.get_auth_token()
+        if not token: raise ValueError("Требуется авторизация")
+        user = get_user_by_token(token)
+        if not user: raise ValueError("Сессия истекла")
+        if roles and user["role"] not in roles: raise ValueError("Нет прав")
+        return user
 
-    def serve_static(self, file_path: Path) -> None:
-        if not file_path.exists() or not file_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
-            return
-
-        mime_types = {
-            ".html": "text/html; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".svg": "image/svg+xml",
-        }
-        content = file_path.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime_types.get(file_path.suffix.lower(), "application/octet-stream"))
+    def serve_static(self, path: Path) -> None:
+        if not path.exists(): self.send_error(404); return
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        content = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
 
-    def do_GET(self) -> None:
+    def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
+        try:
+            if path == "/": self.serve_static(STATIC_DIR / "index.html"); return
+            if path in ("/styles.css", "/app.js"): self.serve_static(STATIC_DIR / path.lstrip("/")); return
+            if path.startswith("/uploads/"): self.serve_static(UPLOADS_DIR / path.split("/")[-1]); return
+            if path == "/api/health": self.send_json({"ok": True, "version": "2.2"}); return
+            
+            token = self.get_auth_token()
+            if path == "/api/me":
+                if not token: raise ValueError("Not auth")
+                user = get_user_by_token(token)
+                if not user: raise ValueError("Invalid token")
+                touch_user_activity(user["id"])
+                self.send_json({"ok": True, "data": user}); return
+            
+            if path == "/api/participant/dashboard":
+                user = self.require_auth(["participant"])
+                self.send_json({"ok": True, "data": get_participant_dashboard(user["id"])}); return
+            if path == "/api/participant/programs":
+                user = self.require_auth(["participant"])
+                self.send_json({"ok": True, "data": get_participant_programs(user["id"])}); return
+            if path.startswith("/api/programs/") and path.endswith("/structure"):
+                pid = int(path.split("/")[3])
+                user = self.require_auth(["participant"])
+                self.send_json({"ok": True, "data": get_program_structure(pid, user["id"])}); return
+            
+            if path == "/api/creator/programs":
+                user = self.require_auth(["creator"])
+                self.send_json({"ok": True, "data": get_creator_programs(user["id"])}); return
+            if path.startswith("/api/programs/") and path.endswith("/analytics"):
+                pid = int(path.split("/")[3])
+                user = self.require_auth(["creator"])
+                self.send_json({"ok": True, "data": get_program_analytics(pid, user["id"])}); return
+            
+            # NEW: Get Modules List for Builder
+            if path.startswith("/api/programs/") and path.endswith("/modules"):
+                pid = int(path.split("/")[3])
+                user = self.require_auth(["creator"])
+                self.send_json({"ok": True, "data": get_program_modules(pid, user["id"])}); return
 
-        if path == "/api/bootstrap":
-            self.send_json({"ok": True, "data": get_bootstrap_state()})
-            return
-
-        if path == "/":
-            self.serve_static(STATIC_DIR / "index.html")
-            return
-
-        if path in {"/styles.css", "/app.js"}:
-            self.serve_static(STATIC_DIR / path.lstrip("/"))
-            return
-
-        if path.startswith("/static/"):
-            self.serve_static(ROOT_DIR / path.lstrip("/"))
-            return
-
-        self.send_error(HTTPStatus.NOT_FOUND, "Route not found")
-
-    def do_HEAD(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
-
-        if path == "/api/bootstrap":
-            body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
-            self.head_response(HTTPStatus.OK, "application/json; charset=utf-8", len(body))
-            return
-
-        if path == "/":
-            file_path = STATIC_DIR / "index.html"
-            if file_path.exists():
-                self.head_response(HTTPStatus.OK, "text/html; charset=utf-8", file_path.stat().st_size)
+            if path.startswith("/api/attachments/"):
+                aid = int(path.split("/")[3])
+                with connect_db() as conn:
+                    att = conn.execute("SELECT * FROM attachments WHERE id = ?", (aid,)).fetchone()
+                    if att: self.send_json({"ok": True, "data": row_to_dict(att)})
+                    else: self.send_json({"ok": False, "error": "Not found"}, 404)
                 return
 
-        if path in {"/styles.css", "/app.js"}:
-            file_path = STATIC_DIR / path.lstrip("/")
-            if file_path.exists():
-                content_type = "text/css; charset=utf-8" if path.endswith(".css") else "application/javascript; charset=utf-8"
-                self.head_response(HTTPStatus.OK, content_type, file_path.stat().st_size)
-                return
+            self.send_json({"ok": False, "error": "Route not found"}, 404)
+        except ValueError as e: self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e: self.send_json({"ok": False, "error": str(e)}, 500)
 
-        self.send_error(HTTPStatus.NOT_FOUND, "Route not found")
-
-    def do_POST(self) -> None:
+    def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
             payload = self.read_json_body()
-            if path == "/api/reports":
-                self.send_json({"ok": True, "data": submit_report(payload)})
-                return
-            if path == "/api/builder/modules":
-                self.send_json({"ok": True, "data": create_module(payload)})
-                return
-            if path == "/api/builder/tasks":
-                self.send_json({"ok": True, "data": create_task(payload)})
-                return
-            if path == "/api/settings/branding":
-                self.send_json({"ok": True, "data": update_branding(payload)})
-                return
-            if path == "/api/private-challenges":
-                self.send_json({"ok": True, "data": create_private_challenge(payload)})
-                return
-            if path == "/api/reset-demo":
-                self.send_json({"ok": True, "data": reset_demo()})
-                return
+            if path == "/api/auth/register":
+                self.send_json({"ok": True, "data": register_user(payload)}); return
+            if path == "/api/auth/login":
+                self.send_json({"ok": True, "data": login_user(payload)}); return
+            
+            user = self.require_auth()
+            if path == "/api/auth/logout":
+                logout_user(self.get_auth_token()); self.send_json({"ok": True}); return
+            
+            if user["role"] == "creator":
+                if path == "/api/programs":
+                    self.send_json({"ok": True, "data": create_program(user["id"], payload)}); return
+                if path.startswith("/api/programs/") and path.endswith("/update"):
+                    pid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": update_program(pid, user["id"], payload)}); return
+                if path.startswith("/api/programs/") and path.endswith("/invitation"):
+                    pid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": generate_invitation_code_api(pid, user["id"], payload)}); return
+                
+                # Modules CRUD
+                if path.startswith("/api/programs/") and path.endswith("/modules"):
+                    pid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": create_module(pid, user["id"], payload)}); return
+                if path.startswith("/api/modules/") and path.endswith("/update"):
+                    mid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": update_module(mid, user["id"], payload)}); return
+                if path.startswith("/api/modules/") and path.endswith("/delete"):
+                    mid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": delete_module(mid, user["id"])}); return
 
-            if path.startswith("/api/participant-tasks/") and path.endswith("/complete"):
-                participant_task_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": complete_task(participant_task_id)})
-                return
-            if path.startswith("/api/participant-tasks/") and path.endswith("/soft-return"):
-                participant_task_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": soft_return_task(participant_task_id)})
-                return
-            if path.startswith("/api/notifications/") and path.endswith("/read"):
-                notification_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": mark_notification_read(notification_id)})
-                return
-            if path.startswith("/api/programs/") and path.endswith("/duplicate"):
-                program_id = int(path.split("/")[3])
-                self.send_json({"ok": True, "data": duplicate_program(program_id)})
-                return
-        except ValueError as error:
-            self.send_json({"ok": False, "error": str(error)}, status=400)
-            return
-        except sqlite3.IntegrityError as error:
-            self.send_json({"ok": False, "error": f"Ошибка данных: {error}"}, status=400)
-            return
-        except Exception as error:
-            self.send_json({"ok": False, "error": f"Внутренняя ошибка: {error}"}, status=500)
-            return
+                # Lessons CRUD
+                if path.startswith("/api/modules/") and path.endswith("/lessons"):
+                    mid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": create_lesson(mid, user["id"], payload)}); return
+                if path.startswith("/api/lessons/") and path.endswith("/update"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": update_lesson(lid, user["id"], payload)}); return
+                if path.startswith("/api/lessons/") and path.endswith("/delete"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": delete_lesson(lid, user["id"])}); return
+                
+                if path.startswith("/api/lessons/") and path.endswith("/attachments"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": upload_attachment(lid, user["id"], payload.get("filename",""), payload.get("content",""), payload.get("mime_type",""))}); return
 
-        self.send_error(HTTPStatus.NOT_FOUND, "Route not found")
+            if user["role"] == "participant":
+                if path.startswith("/api/lessons/") and path.endswith("/progress"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": update_lesson_progress(lid, user["id"], payload.get("status","in_progress"), payload.get("progress"))}); return
+                if path.startswith("/api/lessons/") and path.endswith("/comments"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": add_comment(lid, user["id"], payload.get("content",""))}); return
+                if path.startswith("/api/lessons/") and path.endswith("/rating"):
+                    lid = int(path.split("/")[3])
+                    self.send_json({"ok": True, "data": add_rating(lid, user["id"], int(payload.get("rating",5)))}); return
+                
+                if path.startswith("/api/programs/") and "/join" in path:
+                    code = query.get("code", [None])[0] if (query := parse_qs(parsed.query)) else None # Fix for GET inside POST logic if needed, but join is usually GET. Keeping simple.
+                    # Note: Join is typically GET, but if called via POST with body:
+                    code = payload.get("code") if not code else code
+                    if not code: raise ValueError("Нужен код")
+                    self.send_json({"ok": True, "data": validate_invitation_code(code, user["id"])}); return
 
+            self.send_json({"ok": False, "error": "Route not found"}, 404)
+        except ValueError as e: self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e: self.send_json({"ok": False, "error": str(e)}, 500)
 
-def run() -> None:
+def run():
     init_db()
     server = ThreadingHTTPServer((HOST, PORT), GoalMateHandler)
-    print(f"GoalMate is running on http://{HOST}:{PORT}")
+    print(f"✅ GoalMate запущен: http://{HOST}:{PORT}")
+    print(f"📁 Данные: {DATA_DIR}")
+    print(f"📁 Загрузки: {UPLOADS_DIR}")
     server.serve_forever()
-
 
 if __name__ == "__main__":
     run()

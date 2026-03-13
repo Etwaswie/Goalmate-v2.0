@@ -1,58 +1,180 @@
 <!doctype html>
 <html lang="ru">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GoalMate</title>
-    <link rel="stylesheet" href="/styles.css" />
-  </head>
-  <body>
-    <div class="app-shell">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GoalMate — Платформа марафонов</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <!-- Auth Screen -->
+    <section id="auth-screen" class="auth-screen hidden">
+      <div class="auth-card">
+        <div class="auth-header">
+          <div class="logo">GM</div>
+          <h1>GoalMate</h1>
+          <p class="subtitle">Progress Operating System</p>
+        </div>
+        
+        <div class="auth-tabs">
+          <button class="tab-btn active" data-tab="login">Вход</button>
+          <button class="tab-btn" data-tab="register">Регистрация</button>
+        </div>
+        
+        <form id="login-form" class="auth-form">
+          <label>
+            Email
+            <input type="email" name="email" required placeholder="you@example.com" />
+          </label>
+          <label>
+            Пароль
+            <input type="password" name="password" required placeholder="••••••••" minlength="6" />
+          </label>
+          <button type="submit" class="btn-primary">Войти</button>
+        </form>
+        
+        <form id="register-form" class="auth-form hidden">
+          <label>
+            Имя
+            <input type="text" name="full_name" required placeholder="Ваше имя" />
+          </label>
+          <label>
+            Email
+            <input type="email" name="email" required placeholder="you@example.com" />
+          </label>
+          <label>
+            Пароль
+            <input type="password" name="password" required placeholder="Минимум 6 символов" minlength="6" />
+          </label>
+          <label>
+            Роль
+            <select name="role" required>
+              <option value="participant">Я участник</option>
+              <option value="creator">Я создаю марафоны</option>
+            </select>
+          </label>
+          <button type="submit" class="btn-primary">Зарегистрироваться</button>
+        </form>
+        
+        <p class="auth-note">Нажимая кнопку, вы соглашаетесь с условиями использования</p>
+      </div>
+    </section>
+    
+    <!-- Main App -->
+    <div id="main-app" class="main-app hidden">
       <aside class="sidebar">
         <div class="brand-block">
           <div class="brand-mark">GM</div>
           <div>
             <div class="brand-title">GoalMate</div>
-            <div class="brand-subtitle">Progress Operating System</div>
+            <div class="brand-subtitle" id="user-role-badge">Участник</div>
           </div>
         </div>
+        
         <nav class="nav" id="nav"></nav>
+        
         <div class="sidebar-footer">
-          <div class="sidebar-card">
-            <div class="eyebrow">B2B + B2C</div>
-            <strong>Один движок</strong>
-            <p>Организатор запускает поток, участник превращает опыт в приватный челлендж.</p>
+          <div class="user-mini">
+            <div class="avatar" id="user-avatar">?</div>
+            <div class="user-info">
+              <strong id="user-name">Имя</strong>
+              <span class="subtle" id="user-email">email</span>
+            </div>
           </div>
+          <button class="btn-ghost" id="logout-btn">Выйти</button>
         </div>
       </aside>
-
+      
       <div class="layout">
         <header class="topbar">
           <div>
-            <div class="eyebrow" id="topbar-label">Рабочая демка</div>
-            <h1 id="topbar-title">GoalMate</h1>
+            <div class="eyebrow" id="topbar-label">Рабочая область</div>
+            <h1 id="topbar-title">Обзор</h1>
           </div>
           <div class="topbar-actions">
-            <div class="role-switch" id="role-switch"></div>
-            <button class="ghost-button" id="reset-demo-button" type="button">Сбросить демо</button>
+            <button class="btn-ghost" id="join-code-btn" title="Присоединиться по коду">+ Код</button>
+            <button class="btn-primary" id="create-program-btn" style="display:none">+ Марафон</button>
           </div>
         </header>
-
+        
         <main id="view-root" class="view-root">
-          <section class="loading-state">
+          <div class="loading-state">
             <div class="spinner"></div>
-            <p>GoalMate загружается...</p>
-          </section>
+            <p>Загрузка GoalMate...</p>
+          </div>
         </main>
       </div>
     </div>
-
+    
+    <!-- Modals -->
     <div class="modal hidden" id="modal">
-      <div class="modal-backdrop" data-close-modal="true"></div>
+      <div class="modal-backdrop" data-close-modal></div>
       <div class="modal-card" id="modal-card"></div>
     </div>
-
+    
+    <!-- Toast -->
     <div class="toast hidden" id="toast"></div>
-    <script src="/app.js" type="module"></script>
-  </body>
+    
+    <!-- Join Code Modal -->
+    <template id="join-code-template">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Присоединиться к марафону</h3>
+          <button class="modal-close" data-close-modal>&times;</button>
+        </div>
+        <form id="join-code-form">
+          <label>
+            Код приглашения
+            <input type="text" name="code" required placeholder="ABCD1234" maxlength="8" pattern="[A-Z0-9]{8}" />
+          </label>
+          <p class="hint">Получите код у создателя марафона</p>
+          <button type="submit" class="btn-primary">Присоединиться</button>
+        </form>
+      </div>
+    </template>
+    
+    <!-- Lesson Modal -->
+    <template id="lesson-template">
+      <div class="modal-content lesson-modal">
+        <div class="modal-header">
+          <h3 id="lesson-title">Название урока</h3>
+          <button class="modal-close" data-close-modal>&times;</button>
+        </div>
+        <div class="lesson-body">
+          <div id="lesson-content" class="lesson-content"></div>
+          
+          <div id="lesson-attachments" class="attachments-list"></div>
+          
+          <div class="lesson-actions">
+            <button class="btn-secondary" id="mark-in-progress">Начал изучение</button>
+            <button class="btn-primary" id="mark-completed">Завершить урок</button>
+          </div>
+          
+          <div class="rating-section">
+            <span class="subtle">Оцените урок:</span>
+            <div class="stars" id="lesson-stars">
+              <button data-rate="1">★</button>
+              <button data-rate="2">★</button>
+              <button data-rate="3">★</button>
+              <button data-rate="4">★</button>
+              <button data-rate="5">★</button>
+            </div>
+          </div>
+          
+          <div class="comments-section">
+            <h4>Комментарии</h4>
+            <div id="comments-list" class="comments-list"></div>
+            <form id="comment-form">
+              <textarea name="content" placeholder="Ваш комментарий..." maxlength="2000" required></textarea>
+              <button type="submit" class="btn-ghost">Отправить</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+  
+  <script src="/app.js" type="module"></script>
+</body>
 </html>

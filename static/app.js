@@ -1,1232 +1,634 @@
-const navItems = [
-  { id: "overview", label: "Обзор", role: "all" },
-  { id: "tasks", label: "Мои задачи", role: "participant" },
-  { id: "leaderboard", label: "Лидерборд", role: "all" },
-  { id: "team", label: "Команда", role: "participant" },
-  { id: "organizer", label: "Организатор", role: "organizer" },
-  { id: "builder", label: "Конструктор", role: "organizer" },
-  { id: "analytics", label: "Аналитика", role: "organizer" },
-  { id: "challenges", label: "Челленджи", role: "all" },
-];
-
+// === State ===
 const state = {
-  app: null,
-  currentRole: "participant",
-  currentView: "overview",
-  modal: null,
-  busy: false,
+  user: null,
+  token: localStorage.getItem('gm_token'),
+  currentView: 'dashboard',
+  currentProgram: null,
+  modulesData: [],
+  loading: false
 };
 
-const navRoot = document.getElementById("nav");
-const roleSwitchRoot = document.getElementById("role-switch");
-const viewRoot = document.getElementById("view-root");
-const topbarTitle = document.getElementById("topbar-title");
-const topbarLabel = document.getElementById("topbar-label");
-const modal = document.getElementById("modal");
-const modalCard = document.getElementById("modal-card");
-const toast = document.getElementById("toast");
-const resetDemoButton = document.getElementById("reset-demo-button");
+// === DOM ===
+const $ = (sel) => document.querySelector(sel);
+const authScreen = $('#auth-screen');
+const mainApp = $('#main-app');
+const navRoot = $('#nav');
+const viewRoot = $('#view-root');
+const topbarTitle = $('#topbar-title');
+const topbarLabel = $('#topbar-label');
+const userAvatar = $('#user-avatar');
+const userName = $('#user-name');
+const userEmail = $('#user-email');
+const userRoleBadge = $('#user-role-badge');
+const modal = $('#modal');
+const modalCard = $('#modal-card');
+const toast = $('#toast');
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+// === API ===
+const api = {
+  async request(path, options = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(state.token && { 'Authorization': `Bearer ${state.token}` }),
+      ...options.headers
+    };
+    const res = await fetch(path, { ...options, headers });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Request failed');
+    return data.data;
+  },
+  async post(path, body) { return this.request(path, { method: 'POST', body: JSON.stringify(body) }); },
+  async get(path) { return this.request(path, { method: 'GET' }); }
+};
 
-function initials(name) {
-  return String(name)
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? "")
-    .join("");
-}
-
-function formatDate(value) {
-  if (!value) return "—";
-  const normalized = String(value).includes("T") ? String(value) : `${String(value).replace(" ", "T")}`;
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "numeric",
-    month: "short",
-  }).format(new Date(normalized));
-}
-
-function formatDateTime(value) {
-  if (!value) return "—";
-  const normalized = String(value).includes("T") ? String(value) : `${String(value).replace(" ", "T")}`;
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(normalized));
-}
-
-function formatCompactDay(value) {
-  if (!value) return "—";
-  const normalized = String(value).includes("T") ? String(value) : `${String(value).replace(" ", "T")}`;
-  return new Intl.DateTimeFormat("ru-RU", {
-    weekday: "short",
-  }).format(new Date(normalized));
-}
-
-function allowView(item) {
-  return item.role === "all" || item.role === state.currentRole;
-}
-
+// === Utils ===
+function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str ?? ''; return div.innerHTML; }
+function initials(name) { return String(name).split(' ').filter(Boolean).slice(0,2).map(p => p[0]?.toUpperCase()).join('') || '?'; }
+function formatDate(iso) { if (!iso) return '—'; return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }); }
 function showToast(message, isError = false) {
   toast.textContent = message;
-  toast.classList.remove("hidden");
-  toast.style.background = isError ? "rgba(122, 27, 27, 0.96)" : "rgba(18, 34, 30, 0.96)";
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => {
-    toast.classList.add("hidden");
-  }, 3200);
+  toast.className = `toast ${isError ? 'error' : ''}`;
+  toast.classList.remove('hidden');
+  setTimeout(() => toast.classList.add('hidden'), 3000);
 }
+function closeModal() { modal.classList.add('hidden'); modalCard.innerHTML = ''; }
+function openModal(content) { modalCard.innerHTML = content; modal.classList.remove('hidden'); }
 
-async function request(path, options = {}) {
-  const response = await fetch(path, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
-    ...options,
-  });
-  const payload = await response.json().catch(() => ({ ok: false, error: "Некорректный ответ сервера" }));
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "Не удалось выполнить запрос");
-  }
-  return payload.data;
-}
-
-async function loadState() {
-  state.busy = true;
-  render();
+// === Auth ===
+async function checkAuth() {
+  if (!state.token) return showAuth();
   try {
-    state.app = await request("/api/bootstrap");
-    const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
-    if (!allowedCurrentView) {
-      state.currentView = "overview";
-    }
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    state.busy = false;
-    render();
-  }
+    state.user = await api.get('/api/me');
+    showApp();
+    renderNav();
+    loadView(state.currentView);
+  } catch { logout(); }
 }
 
-async function performRequest(path, payload = null) {
-  state.busy = true;
-  render();
+function showAuth() { authScreen.classList.remove('hidden'); mainApp.classList.add('hidden'); }
+function showApp() {
+  authScreen.classList.add('hidden'); mainApp.classList.remove('hidden');
+  userAvatar.textContent = initials(state.user.full_name);
+  userAvatar.style.background = state.user.avatar_bg;
+  userName.textContent = state.user.full_name;
+  userEmail.textContent = state.user.email;
+  userRoleBadge.textContent = state.user.role === 'creator' ? 'Создатель' : 'Участник';
+  $('#create-program-btn').style.display = state.user.role === 'creator' ? 'inline-flex' : 'none';
+  $('#join-code-btn').style.display = state.user.role === 'participant' ? 'inline-flex' : 'none';
+}
+
+async function login(payload) {
   try {
-    state.app = await request(path, {
-      method: "POST",
-      body: payload ? JSON.stringify(payload) : JSON.stringify({}),
-    });
-    closeModal();
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    state.busy = false;
-    render();
-  }
+    const { token, ...user } = await api.post('/api/auth/login', payload);
+    state.token = token; state.user = user;
+    localStorage.setItem('gm_token', token);
+    showApp(); renderNav(); loadView('dashboard');
+    showToast('Добро пожаловать!');
+  } catch (e) { showToast(e.message, true); }
 }
 
-function setRole(nextRole) {
-  state.currentRole = nextRole;
-  const allowedCurrentView = navItems.some((item) => item.id === state.currentView && allowView(item));
-  if (!allowedCurrentView) {
-    state.currentView = "overview";
-  }
-  render();
+async function register(payload) {
+  try {
+    const { token, ...user } = await api.post('/api/auth/register', payload);
+    state.token = token; state.user = user;
+    localStorage.setItem('gm_token', token);
+    showApp(); renderNav(); loadView('dashboard');
+    showToast('Регистрация успешна!');
+  } catch (e) { showToast(e.message, true); }
 }
 
-function setView(nextView) {
-  state.currentView = nextView;
-  render();
+function logout() {
+  api.post('/api/auth/logout').catch(() => {});
+  localStorage.removeItem('gm_token');
+  state.token = null; state.user = null;
+  showAuth();
 }
 
-function openReportModal(taskId) {
-  const task = state.app?.participantBoard?.tasks?.find((item) => item.participant_task_id === taskId);
-  if (!task) return;
-  state.modal = { type: "report", taskId };
-  renderModal();
-}
-
-function closeModal() {
-  state.modal = null;
-  renderModal();
-}
+// === Navigation ===
+const navItems = {
+  participant: [
+    { id: 'dashboard', label: 'Дашборд', icon: '📊' },
+    { id: 'programs', label: 'Мои марафоны', icon: '🎯' },
+    { id: 'achievements', label: 'Достижения', icon: '🏆' },
+  ],
+  creator: [
+    { id: 'dashboard', label: 'Дашборд', icon: '📊' },
+    { id: 'programs', label: 'Мои марафоны', icon: '📚' },
+    { id: 'builder', label: 'Конструктор', icon: '✏️' },
+  ]
+};
 
 function renderNav() {
-  const items = navItems.filter(allowView);
-  navRoot.innerHTML = items
-    .map(
-      (item) => `
-        <button class="nav-button ${item.id === state.currentView ? "active" : ""}" type="button" data-view="${item.id}">
-          <span class="nav-label">
-            <strong>${escapeHtml(item.label)}</strong>
-            <span class="nav-role">${item.role === "all" ? "Общий экран" : item.role === "participant" ? "Участник" : "Организатор"}</span>
-          </span>
-          <span>→</span>
-        </button>
-      `
-    )
-    .join("");
+  if (!state.user) return;
+  const items = navItems[state.user.role] || [];
+  navRoot.innerHTML = items.map(item => `
+    <button class="nav-btn ${item.id === state.currentView ? 'active' : ''}" data-view="${item.id}">
+      <span class="icon">${item.icon}</span>
+      <span>${item.label}</span>
+    </button>
+  `).join('');
 }
 
-function renderRoleSwitch() {
-  roleSwitchRoot.innerHTML = `
-    <button class="role-button ${state.currentRole === "participant" ? "active" : ""}" type="button" data-role="participant">Роль: участник</button>
-    <button class="role-button ${state.currentRole === "organizer" ? "active" : ""}" type="button" data-role="organizer">Роль: организатор</button>
-  `;
-}
-
-function renderAvatar(person, large = false) {
-  return `
-    <div class="${large ? "avatar-large" : "avatar"}" style="background:${escapeHtml(person.avatar_bg)}">
-      ${escapeHtml(initials(person.full_name))}
-    </div>
-  `;
-}
-
-function renderTaskCard(task) {
-  const reportBox = task.report_content
-    ? `
-      <div class="report-box">
-        <div class="eyebrow">Отчёт участника</div>
-        <strong>${escapeHtml(task.report_type || "report")}</strong>
-        <p class="subtle">${escapeHtml(task.report_content)}</p>
-        <div class="task-meta">
-          <span>${escapeHtml(task.attachment_name || "Без вложения")}</span>
-          <span>${escapeHtml(task.report_status || "accepted")}</span>
-        </div>
-      </div>
-    `
-    : "";
-
-  let actionMarkup = "";
-  if (task.status === "completed") {
-    actionMarkup = `<button class="secondary-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Обновить отчёт</button>`;
-  } else if (task.status === "missed") {
-    actionMarkup = `<button class="primary-button" type="button" data-action="soft-return" data-task-id="${task.participant_task_id}">Мягкий возврат</button>`;
-  } else if (task.report_required) {
-    actionMarkup = `<button class="primary-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Сдать отчёт</button>`;
-  } else {
-    actionMarkup = `<button class="secondary-button" type="button" data-action="complete-task" data-task-id="${task.participant_task_id}">Отметить выполненным</button>`;
-  }
-
-  return `
-    <article class="task-card">
-      <div class="task-head">
-        <div>
-          <div class="eyebrow">${escapeHtml(task.module_title)}</div>
-          <h3>${escapeHtml(task.title)}</h3>
-        </div>
-        <span class="badge ${escapeHtml(task.badge.tone)}">${escapeHtml(task.badge.label)}</span>
-      </div>
-      <p class="task-description">${escapeHtml(task.description)}</p>
-      <div class="task-meta">
-        <span>${escapeHtml(formatDate(task.scheduled_for))}</span>
-        <span>${escapeHtml(task.points)} XP</span>
-        <span>${escapeHtml(task.estimated_minutes)} мин</span>
-        <span>${escapeHtml(task.submission_mode)}</span>
-      </div>
-      <div class="progress-track">
-        <div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(task.participant_progress)))}%"></div>
-      </div>
-      ${task.status === "missed" ? `<div class="report-box"><strong>Мягкий возврат:</strong><p class="subtle">${escapeHtml(task.soft_return_copy)}</p></div>` : ""}
-      ${reportBox}
-      <div class="button-row">
-        ${actionMarkup}
-      </div>
-    </article>
-  `;
-}
-
-function renderNotificationCard(item) {
-  return `
-    <article class="notification-card">
-      <div class="task-head">
-        <div>
-          <div class="eyebrow">${escapeHtml(item.notification_type)}</div>
-          <h3>${escapeHtml(item.title)}</h3>
-        </div>
-        ${item.is_read ? `<span class="badge neutral">Прочитано</span>` : `<span class="badge info">Новое</span>`}
-      </div>
-      <p>${escapeHtml(item.message)}</p>
-      <div class="task-meta">
-        <span>${escapeHtml(item.cta_label)}</span>
-        <span>${escapeHtml(formatDateTime(item.created_at))}</span>
-      </div>
-      ${item.is_read ? "" : `<button class="inline-button" type="button" data-action="notification-read" data-id="${item.id}">Пометить прочитанным</button>`}
-    </article>
-  `;
-}
-
-function renderHero() {
-  const { program, participant, participantBoard } = state.app;
-  return `
-    <section class="hero">
-      <div class="hero-grid">
-        <div>
-          <div class="eyebrow hero-eyebrow">GoalMate / ${escapeHtml(state.currentRole === "participant" ? "Experience Layer" : "Operator Layer")}</div>
-          <h2>${escapeHtml(program.name)}</h2>
-          <p>${escapeHtml(program.description)}</p>
-          <div class="hero-actions" style="margin-top:18px">
-            <span class="chip">Прогресс ${escapeHtml(participant.progress_percent)}%</span>
-            <span class="chip">Ранг #${escapeHtml(participant.rank)}</span>
-            <span class="chip">${escapeHtml(participant.xp)} XP</span>
-            <span class="chip">${escapeHtml(participantBoard.unreadNotifications)} непрочитанных nudges</span>
-          </div>
-        </div>
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="eyebrow">Сегодня в фокусе</div>
-            <div class="stat-value">${escapeHtml(participantBoard.todayFocus)} / ${escapeHtml(participantBoard.totalFocus)}</div>
-            <div class="stat-caption">задач уже в движении</div>
-          </div>
-          <div class="stat-card">
-            <div class="eyebrow">Мини-команда</div>
-            <div class="stat-value">${escapeHtml(state.app.team.done_today)} / ${escapeHtml(state.app.team.member_count)}</div>
-            <div class="stat-caption">участников держат темп</div>
-          </div>
-          <div class="stat-card">
-            <div class="eyebrow">Мягкий возврат</div>
-            <div class="stat-value">${escapeHtml(participantBoard.softReturnCount)}</div>
-            <div class="stat-caption">использован без потери прогресса</div>
-          </div>
-          <div class="stat-card">
-            <div class="eyebrow">B2B эффект</div>
-            <div class="stat-value">${escapeHtml(state.app.organizerDashboard.hoursSavedPerWeek)}</div>
-            <div class="stat-caption">часов экономии в неделю</div>
-          </div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderOverview() {
-  const { participantBoard, notifications, organizerDashboard, privateChallenges, participant } = state.app;
-  const previewTasks = participantBoard.tasks.slice(0, 4).map(renderTaskCard).join("");
-  const previewNotifications = notifications.slice(0, 3).map(renderNotificationCard).join("");
-  const challenges = privateChallenges
-    .slice(0, 2)
-    .map(
-      (challenge) => `
-        <article class="challenge-card">
-          <div class="task-head">
-            <div>
-              <div class="eyebrow">B2C growth loop</div>
-              <h3>${escapeHtml(challenge.name)}</h3>
-            </div>
-            <span class="badge neutral">${escapeHtml(challenge.status)}</span>
-          </div>
-          <p>${escapeHtml(challenge.goal_text)}</p>
-          <div class="task-meta">
-            <span>${escapeHtml(challenge.member_count)} / ${escapeHtml(challenge.target_team_size)} участников</span>
-            <span>${escapeHtml(challenge.target_per_week)} шагов в неделю</span>
-          </div>
-        </article>
-      `
-    )
-    .join("");
-
-  return `
-    ${renderHero()}
-    <section class="split-grid">
-      <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">Основной сценарий участника</div>
-            <h3>Текущая неделя без перегруза</h3>
-          </div>
-          <button class="secondary-button" type="button" data-view="tasks">Открыть все задачи</button>
-        </div>
-        <div class="task-grid" style="margin-top:18px">${previewTasks}</div>
-      </div>
-      <div class="share-card">
-        <div class="eyebrow">Виральный артефакт</div>
-        <h3>${escapeHtml(participant.shareCard.title)}</h3>
-        <p class="subtle">${escapeHtml(participant.shareCard.subtitle)}</p>
-        <div class="list-stack" style="margin-top:18px">
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.shareCard.progress_percent)}%</strong><span class="subtle">общий прогресс в потоке</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.shareCard.xp)} XP</strong><span class="subtle">накоплено на этой неделе</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>#${escapeHtml(participant.shareCard.rank)}</strong><span class="subtle">позиция в лидерборде</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.shareCard.team_name)}</strong><span class="subtle">мини-команда поддерживает темп</span></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="split-grid">
-      <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">B2B dashboard</div>
-            <h3>Что видит организатор прямо сейчас</h3>
-          </div>
-          <button class="secondary-button" type="button" data-view="organizer">Открыть экран организатора</button>
-        </div>
-        <div class="kpi-grid" style="margin-top:18px">
-          <div class="kpi">
-            <div class="eyebrow">Участники</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.totalParticipants)}</div>
-            <div class="kpi-caption">в активном потоке</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Доходимость</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.completionRate)}%</div>
-            <div class="kpi-caption">текущий средний прогресс</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Риск оттока</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.atRiskCount)}</div>
-            <div class="kpi-caption">нужны nudges</div>
-          </div>
-          <div class="kpi">
-            <div class="eyebrow">Отчёты сегодня</div>
-            <div class="kpi-value">${escapeHtml(organizerDashboard.reportsToday)}</div>
-            <div class="kpi-caption">уже принято системой</div>
-          </div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="eyebrow">Контекстные уведомления</div>
-        <h3>Smart nudges вместо обычных пушей</h3>
-        <div class="notification-stack" style="margin-top:18px">${previewNotifications}</div>
-      </div>
-    </section>
-
-    <section class="challenge-grid">
-      <div class="panel">
-        <div class="eyebrow">Органический рост</div>
-        <h3>Приватные челленджи после марафона</h3>
-        <p class="subtle">Тот же продукт можно использовать без организатора. Это даёт естественный B2C-канал поверх B2B-дистрибуции.</p>
-        <div class="list-stack" style="margin-top:18px">${challenges || '<div class="empty-card">Пока нет приватных челленджей</div>'}</div>
-      </div>
-      <div class="panel">
-        <div class="eyebrow">Архитектура MVP</div>
-        <h3>Что уже заложено в демке</h3>
-        <div class="list-stack" style="margin-top:18px">
-          <div class="list-box"><strong>No-code конструктор</strong><p class="subtle">Можно добавлять модули и задания в поток без кода.</p></div>
-          <div class="list-box"><strong>Локальная SQLite база</strong><p class="subtle">Все действия сохраняются локально и переживают перезагрузку страницы.</p></div>
-          <div class="list-box"><strong>Два сценария</strong><p class="subtle">Участник и организатор работают на одном стеке данных.</p></div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderTasksView() {
-  const { participantBoard, notifications } = state.app;
-  return `
-    ${renderHero()}
-    <section class="split-grid">
-      <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">Мои задания</div>
-            <h3>Неделя, где можно вернуться без чувства провала</h3>
-          </div>
-          <div class="chip-row">
-            <span class="chip" style="color:#fff">${escapeHtml(participantBoard.missedCount)} пропущено</span>
-            <span class="chip" style="color:#fff">${escapeHtml(participantBoard.softReturnCount)} мягких возвратов</span>
-          </div>
-        </div>
-        <div class="task-grid" style="margin-top:18px">
-          ${participantBoard.tasks.map(renderTaskCard).join("")}
-        </div>
-      </div>
-      <div class="panel">
-        <div class="eyebrow">Nudges</div>
-        <h3>Напоминания, привязанные к контексту</h3>
-        <div class="notification-stack" style="margin-top:18px">
-          ${notifications.map(renderNotificationCard).join("")}
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderLeaderboardView() {
-  const { leaderboard, participant, team } = state.app;
-  return `
-    ${renderHero()}
-    <section class="split-grid">
-      <div class="panel">
-        <div class="eyebrow">Общий зачёт</div>
-        <h3>Лидерборд потока</h3>
-        <div class="podium" style="margin-top:18px">
-          ${leaderboard.topThree
-            .map((person, index) => {
-              const classes = ["second", "first", "third"][index] || "";
-              return `
-                <article class="podium-card ${classes}">
-                  ${renderAvatar(person, true)}
-                  <h3 style="margin-top:14px">${escapeHtml(person.full_name)}</h3>
-                  <p class="subtle">#${escapeHtml(person.rank)} • ${escapeHtml(person.xp)} XP • ${escapeHtml(person.progress_percent)}%</p>
-                </article>
-              `;
-            })
-            .join("")}
-        </div>
-      </div>
-      <div class="share-card">
-        <div class="eyebrow">Командная динамика</div>
-        <h3>Твоя команда: ${escapeHtml(team.name)}</h3>
-        <p class="subtle">${escapeHtml(team.goal_text)}</p>
-        <div class="list-stack" style="margin-top:18px">
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(team.xp_total)} XP</strong><span class="subtle">суммарно набрала команда</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(team.progress_percent)}%</strong><span class="subtle">общий темп команды</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>#${escapeHtml(participant.rank)}</strong><span class="subtle">твоё место в общем зачёте</span></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="table-card">
-      <div class="table-toolbar">
-        <div>
-          <div class="eyebrow">Полный список</div>
-          <h3>Кто держит темп, а кому нужен мягкий nudging</h3>
-        </div>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Участник</th>
-            <th>Прогресс</th>
-            <th>XP</th>
-            <th>Состояние</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${leaderboard.rows
-            .map(
-              (row) => `
-                <tr class="${row.participant_id === participant.id ? "highlight-row" : ""}">
-                  <td>${escapeHtml(row.rank)}</td>
-                  <td>
-                    <div class="person-cell">
-                      ${renderAvatar(row)}
-                      <div>
-                        <strong>${escapeHtml(row.full_name)}</strong>
-                        <div class="subtle">${escapeHtml(formatDateTime(row.last_active_at))}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td>
-                    <div class="progress-track"><div class="progress-fill" style="width:${escapeHtml(row.progress_percent)}%"></div></div>
-                    <div class="subtle" style="margin-top:6px">${escapeHtml(row.progress_percent)}%</div>
-                  </td>
-                  <td>${escapeHtml(row.xp)}</td>
-                  <td>${row.at_risk ? '<span class="badge warning">Нужен возврат</span>' : '<span class="badge success">В ритме</span>'}</td>
-                </tr>
-              `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </section>
-  `;
-}
-
-function renderTeamView() {
-  const { team, organizerDashboard } = state.app;
-  return `
-    ${renderHero()}
-    <section class="split-grid">
-      <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">Мини-команда ${escapeHtml(team.name)}</div>
-            <h3>Accountability на 3-7 человек вместо шума в общем чате</h3>
-          </div>
-          <span class="badge success">${escapeHtml(team.progress_percent)}% командного прогресса</span>
-        </div>
-        <div class="team-member-grid" style="margin-top:18px">
-          ${team.members
-            .map(
-              (member) => `
-                <article class="team-member-card">
-                  <div class="task-head">
-                    <div class="person-cell">
-                      ${renderAvatar(member)}
-                      <div>
-                        <strong>${escapeHtml(member.full_name)}</strong>
-                        <div class="member-meta">${member.is_captain ? "Капитан команды" : "Участник"}</div>
-                      </div>
-                    </div>
-                    <span class="badge ${member.progress_percent >= 80 ? "success" : "info"}">${escapeHtml(member.progress_percent)}%</span>
-                  </div>
-                  <div class="task-meta">
-                    <span>${escapeHtml(member.xp)} XP</span>
-                    <span>${escapeHtml(member.streak_days)} дней streak</span>
-                  </div>
-                </article>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-      <div class="panel">
-        <div class="eyebrow">Командная лента</div>
-        <h3>Последние отчёты, которые держат ритм</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${organizerDashboard.recentReports
-            .slice(0, 4)
-            .map(
-              (report) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <strong>${escapeHtml(report.full_name)}</strong>
-                    <span class="badge neutral">${escapeHtml(report.report_type)}</span>
-                  </div>
-                  <p class="subtle">${escapeHtml(report.title)}</p>
-                  <p class="subtle">${escapeHtml(report.content)}</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderOrganizerView() {
-  const { organizerDashboard, organizer } = state.app;
-  return `
-    ${renderHero()}
-    <section class="panel">
-      <div class="eyebrow">Операционный центр организатора</div>
-      <h3>Вместо Google Sheets + Telegram + ручных напоминаний</h3>
-      <div class="kpi-grid" style="margin-top:18px">
-        <div class="kpi"><div class="eyebrow">Участники</div><div class="kpi-value">${escapeHtml(organizerDashboard.totalParticipants)}</div><div class="kpi-caption">внутри текущего потока</div></div>
-        <div class="kpi"><div class="eyebrow">Доходимость</div><div class="kpi-value">${escapeHtml(organizerDashboard.completionRate)}%</div><div class="kpi-caption">в среднем по потоку</div></div>
-        <div class="kpi"><div class="eyebrow">В риске</div><div class="kpi-value">${escapeHtml(organizerDashboard.atRiskCount)}</div><div class="kpi-caption">требуют внимания</div></div>
-        <div class="kpi"><div class="eyebrow">Экономия</div><div class="kpi-value">${escapeHtml(organizerDashboard.hoursSavedPerWeek)}</div><div class="kpi-caption">часов в неделю</div></div>
-      </div>
-    </section>
-
-    <section class="org-grid">
-      <div class="panel">
-        <div class="eyebrow">Риск оттока</div>
-        <h3>Кого ловить до того, как человек отвалится</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${organizerDashboard.atRiskParticipants
-            .map(
-              (person) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <div class="person-cell">
-                      ${renderAvatar(person)}
-                      <div>
-                        <strong>${escapeHtml(person.full_name)}</strong>
-                        <div class="subtle">${escapeHtml(formatDateTime(person.last_active_at))}</div>
-                      </div>
-                    </div>
-                    <span class="badge warning">${escapeHtml(person.soft_return_count)} возврата</span>
-                  </div>
-                  <p class="subtle">Прогресс ${escapeHtml(person.progress_percent)}%, очки ${escapeHtml(person.xp)}. Этому участнику лучше отправить поддерживающий nudging, а не жёсткий выговор.</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-      <div class="panel">
-        <div class="eyebrow">Последние отчёты</div>
-        <h3>Что участники уже сдали системе</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${organizerDashboard.recentReports
-            .map(
-              (report) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <strong>${escapeHtml(report.full_name)}</strong>
-                    <span class="badge success">${escapeHtml(report.status)}</span>
-                  </div>
-                  <p class="subtle">${escapeHtml(report.title)}</p>
-                  <p class="subtle">${escapeHtml(report.content)}</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    </section>
-
-    <section class="org-grid">
-      <div class="panel">
-        <div class="eyebrow">Smart triggers</div>
-        <h3>Автоматизации, которые уже можно масштабировать</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${organizerDashboard.smartTriggers
-            .map(
-              (item) => `
-                <div class="list-box">
-                  <strong>${escapeHtml(item.title)}</strong>
-                  <p class="subtle">${escapeHtml(item.description)}</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-
-      <div class="form-card">
-        <div class="eyebrow">White label</div>
-        <h3>Настройки брендинга организатора</h3>
-        <form id="branding-form">
-          <div class="form-grid">
-            <label>
-              Название бренда
-              <input name="brandName" value="${escapeHtml(organizer.brand_name)}" required />
-            </label>
-            <label>
-              Support email
-              <input name="supportEmail" value="${escapeHtml(organizer.support_email)}" required />
-            </label>
-            <label>
-              Primary color
-              <input name="primaryColor" value="${escapeHtml(organizer.primary_color)}" required />
-            </label>
-            <label>
-              Accent color
-              <input name="accentColor" value="${escapeHtml(organizer.accent_color)}" required />
-            </label>
-          </div>
-          <button class="primary-button" type="submit">Сохранить брендинг</button>
-        </form>
-      </div>
-    </section>
-  `;
-}
-
-function renderBuilderView() {
-  const { builder } = state.app;
-  return `
-    ${renderHero()}
-    <section class="org-grid">
-      <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">No-code конструктор</div>
-            <h3>Структура текущего марафона</h3>
-          </div>
-          <button class="secondary-button" type="button" data-action="duplicate-program" data-id="1">Клонировать поток</button>
-        </div>
-        <div class="module-stack" style="margin-top:18px">
-          ${builder.modules
-            .map(
-              (module) => `
-                <article class="module-card">
-                  <div class="task-head">
-                    <div>
-                      <div class="eyebrow">${escapeHtml(module.week_label)}</div>
-                      <h3>${escapeHtml(module.title)}</h3>
-                    </div>
-                    <span class="badge neutral">${escapeHtml(module.tasks.length)} задач</span>
-                  </div>
-                  <p class="subtle">${escapeHtml(module.description)}</p>
-                  <div class="module-tasks">
-                    ${module.tasks
-                      .map(
-                        (task) => `
-                          <div class="module-task-pill">
-                            <strong>${escapeHtml(task.title)}</strong>
-                            <span class="subtle">${escapeHtml(task.task_type)} • ${escapeHtml(task.points)} XP • ${escapeHtml(task.submission_mode)}</span>
-                          </div>
-                        `
-                      )
-                      .join("")}
-                  </div>
-                </article>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="eyebrow">Библиотека шаблонов</div>
-        <h3>Переиспользование прошлых запусков</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${builder.reusablePrograms
-            .map(
-              (program) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <div>
-                      <strong>${escapeHtml(program.name)}</strong>
-                      <div class="subtle">${escapeHtml(program.status)} • ${escapeHtml(program.module_count)} модулей • ${escapeHtml(program.task_count)} задач</div>
-                    </div>
-                    <button class="inline-button" type="button" data-action="duplicate-program" data-id="${program.id}">Дублировать</button>
-                  </div>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    </section>
-
-    <section class="org-grid">
-      <div class="form-card">
-        <div class="eyebrow">Новый модуль</div>
-        <h3>Добавить этап программы</h3>
-        <form id="module-form">
-          <div class="form-grid">
-            <label>
-              Название модуля
-              <input name="title" placeholder="Например: Рефлексия и закрепление" required />
-            </label>
-            <label>
-              Лейбл недели
-              <input name="weekLabel" placeholder="Неделя 4" required />
-            </label>
-          </div>
-          <label>
-            Описание
-            <textarea name="description" placeholder="Кратко объясни, зачем нужен этот этап."></textarea>
-          </label>
-          <button class="primary-button" type="submit">Добавить модуль</button>
-        </form>
-      </div>
-
-      <div class="form-card">
-        <div class="eyebrow">Новое задание</div>
-        <h3>Добавить шаг в программу</h3>
-        <form id="task-form">
-          <div class="form-grid">
-            <label>
-              Модуль
-              <select name="moduleId" required>
-                ${builder.modules.map((module) => `<option value="${module.id}">${escapeHtml(module.week_label)} / ${escapeHtml(module.title)}</option>`).join("")}
-              </select>
-            </label>
-            <label>
-              Название
-              <input name="title" placeholder="Например: 10 минут тишины" required />
-            </label>
-            <label>
-              Тип
-              <input name="taskType" value="reflection" required />
-            </label>
-            <label>
-              Формат сдачи
-              <select name="submissionMode">
-                <option value="text">text</option>
-                <option value="photo">photo</option>
-                <option value="voice">voice</option>
-                <option value="checklist">checklist</option>
-              </select>
-            </label>
-            <label>
-              XP
-              <input name="points" type="number" value="120" min="10" required />
-            </label>
-            <label>
-              Минуты
-              <input name="estimatedMinutes" type="number" value="15" min="1" required />
-            </label>
-            <label>
-              Дата
-              <input name="scheduledFor" type="date" required />
-            </label>
-            <label>
-              Мягкий возврат
-              <input name="softReturnCopy" placeholder="Как участнику вернуться без стыда" />
-            </label>
-          </div>
-          <label>
-            Описание
-            <textarea name="description" placeholder="Что именно должен сделать участник."></textarea>
-          </label>
-          <button class="primary-button" type="submit">Добавить задание</button>
-        </form>
-      </div>
-    </section>
-  `;
-}
-
-function renderAnalyticsView() {
-  const { analytics, organizerDashboard } = state.app;
-  const maxCompletion = Math.max(...analytics.dailyMetrics.map((item) => Number(item.completion_rate)), 1);
-  return `
-    ${renderHero()}
-    <section class="analytics-grid">
-      <div class="metric-card">
-        <div class="metric-card-header">
-          <div>
-            <div class="eyebrow">Engagement pulse</div>
-            <h3>Динамика по дням</h3>
-          </div>
-        </div>
-        <div class="metric-bars" style="margin-top:18px">
-          ${analytics.dailyMetrics
-            .map(
-              (item) => `
-                <div class="metric-bar">
-                  <div class="metric-bar-track">
-                    <div class="metric-bar-fill" style="height:${Math.max(24, (Number(item.completion_rate) / maxCompletion) * 210)}px"></div>
-                  </div>
-                  <strong>${escapeHtml(item.completion_rate)}%</strong>
-                  <div class="metric-bar-label">${escapeHtml(formatCompactDay(item.metric_date))}</div>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="eyebrow">Cohorts</div>
-        <h3>Сегментация участников</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${analytics.cohorts
-            .map(
-              (cohort) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <strong>${escapeHtml(cohort.label)}</strong>
-                    <span class="badge ${escapeHtml(cohort.tone)}">${escapeHtml(cohort.count)}</span>
-                  </div>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    </section>
-
-    <section class="org-grid">
-      <div class="panel">
-        <div class="eyebrow">Drop-off signals</div>
-        <h3>Что видно в локальной аналитике</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${analytics.dailyMetrics
-            .slice()
-            .reverse()
-            .map(
-              (item) => `
-                <div class="list-box">
-                  <div class="task-head">
-                    <strong>${escapeHtml(formatDate(item.metric_date))}</strong>
-                    <span class="badge ${item.missed_tasks > 8 ? "warning" : "info"}">${escapeHtml(item.missed_tasks)} missed</span>
-                  </div>
-                  <p class="subtle">${escapeHtml(item.active_participants)} активных участников, ${escapeHtml(item.reports_submitted)} отчётов, completion ${escapeHtml(item.completion_rate)}%.</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="eyebrow">Automation layer</div>
-        <h3>Какие действия стоит автоматизировать дальше</h3>
-        <div class="list-stack" style="margin-top:18px">
-          ${organizerDashboard.smartTriggers
-            .map(
-              (item) => `
-                <div class="list-box">
-                  <strong>${escapeHtml(item.title)}</strong>
-                  <p class="subtle">${escapeHtml(item.description)}</p>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderChallengesView() {
-  const { privateChallenges, participant } = state.app;
-  return `
-    ${renderHero()}
-    <section class="challenge-grid">
-      <div class="form-card">
-        <div class="eyebrow">B2C сценарий</div>
-        <h3>Создать приватный челлендж с друзьями</h3>
-        <form id="challenge-form">
-          <div class="form-grid">
-            <label>
-              Название
-              <input name="name" placeholder="Например: Утренний бег без срывов" required />
-            </label>
-            <label>
-              Цель
-              <input name="goalText" placeholder="4 пробежки в неделю" required />
-            </label>
-            <label>
-              Шагов в неделю
-              <input name="targetPerWeek" type="number" value="4" min="1" required />
-            </label>
-            <label>
-              Размер команды
-              <input name="targetTeamSize" type="number" value="4" min="2" max="7" required />
-            </label>
-            <label>
-              Длительность, недели
-              <input name="durationWeeks" type="number" value="3" min="1" required />
-            </label>
-          </div>
-          <label>
-            Контекст
-            <textarea name="description" placeholder="Коротко опиши механику для друзей."></textarea>
-          </label>
-          <button class="primary-button" type="submit">Создать челлендж</button>
-        </form>
-      </div>
-
-      <div class="share-card">
-        <div class="eyebrow">Почему это работает</div>
-        <h3>Growth loop поверх B2B дистрибуции</h3>
-        <p class="subtle">Участник уже понял ценность продукта внутри потока. Дальше он создаёт свой челлендж и тянет новых пользователей в тот же продукт.</p>
-        <div class="list-stack" style="margin-top:18px">
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.xp)} XP</strong><span class="subtle">социальное доказательство для приглашений</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.progress_percent)}%</strong><span class="subtle">личный результат уже есть</span></div>
-          <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(participant.streak_days)} дней</strong><span class="subtle">есть история, которой хочется делиться</span></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="eyebrow">Текущие приватные челленджи</div>
-      <h3>Seeded сценарии для дальнейшего развития B2C</h3>
-      <div class="challenge-grid" style="margin-top:18px">
-        ${privateChallenges
-          .map(
-            (challenge) => `
-              <article class="challenge-card">
-                <div class="task-head">
-                  <div>
-                    <div class="eyebrow">${escapeHtml(challenge.visibility)}</div>
-                    <h3>${escapeHtml(challenge.name)}</h3>
-                  </div>
-                  <span class="badge ${challenge.status === "active" ? "success" : "neutral"}">${escapeHtml(challenge.status)}</span>
-                </div>
-                <p>${escapeHtml(challenge.description)}</p>
-                <div class="task-meta">
-                  <span>${escapeHtml(challenge.goal_text)}</span>
-                  <span>${escapeHtml(challenge.member_count)} / ${escapeHtml(challenge.target_team_size)} участников</span>
-                </div>
-                <div class="person-cell" style="margin-top:14px; flex-wrap:wrap">
-                  ${challenge.members.map((member) => renderAvatar(member)).join("")}
-                </div>
-              </article>
-            `
-          )
-          .join("")}
-      </div>
-    </section>
-  `;
-}
-
-function renderCurrentView() {
-  if (!state.app) {
-    return `
-      <section class="loading-state">
-        <div class="spinner"></div>
-        <p>Подключаем локальную демку GoalMate...</p>
-      </section>
-    `;
-  }
-
-  const views = {
-    overview: renderOverview,
-    tasks: renderTasksView,
-    leaderboard: renderLeaderboardView,
-    team: renderTeamView,
-    organizer: renderOrganizerView,
-    builder: renderBuilderView,
-    analytics: renderAnalyticsView,
-    challenges: renderChallengesView,
-  };
-
-  return views[state.currentView]?.() ?? renderOverview();
-}
-
-function renderModal() {
-  if (!state.modal || !state.app) {
-    modal.classList.add("hidden");
-    modalCard.innerHTML = "";
-    return;
-  }
-
-  if (state.modal.type === "report") {
-    const task = state.app.participantBoard.tasks.find((item) => item.participant_task_id === state.modal.taskId);
-    modalCard.innerHTML = `
-      <div class="table-toolbar">
-        <div>
-          <div class="eyebrow">Сдать отчёт</div>
-          <h3>${escapeHtml(task.title)}</h3>
-        </div>
-        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
-      </div>
-      <p class="subtle">${escapeHtml(task.description)}</p>
-      <form id="report-form" style="margin-top:18px">
-        <input type="hidden" name="participantTaskId" value="${task.participant_task_id}" />
-        <div class="form-grid">
-          <label>
-            Формат отчёта
-            <select name="reportType">
-              <option value="text">text</option>
-              <option value="photo">photo</option>
-              <option value="voice">voice</option>
-            </select>
-          </label>
-          <label>
-            Имя вложения
-            <input name="attachmentName" placeholder="Например: report-photo.jpg" value="${escapeHtml(task.attachment_name || "")}" />
-          </label>
-        </div>
-        <label>
-          Текст отчёта
-          <textarea name="content" placeholder="Что получилось, где было трудно, какой результат виден уже сейчас." required>${escapeHtml(task.report_content || "")}</textarea>
-        </label>
-        <button class="primary-button" type="submit">Отправить отчёт</button>
-      </form>
-    `;
-  }
-
-  modal.classList.remove("hidden");
-}
-
-function render() {
+function setView(viewId) {
+  state.currentView = viewId;
   renderNav();
-  renderRoleSwitch();
-  if (state.app) {
-    topbarTitle.textContent = state.currentRole === "participant" ? "GoalMate: участник" : "GoalMate: организатор";
-    topbarLabel.textContent = `${state.app.program.brand_name} • ${state.currentRole === "participant" ? "participant demo" : "operator demo"}`;
-  }
-
-  viewRoot.innerHTML = renderCurrentView();
-  renderModal();
-  resetDemoButton.disabled = state.busy;
+  loadView(viewId);
 }
 
-document.addEventListener("click", async (event) => {
-  const viewButton = event.target.closest("[data-view]");
-  if (viewButton) {
-    setView(viewButton.dataset.view);
+// === Views ===
+async function loadView(viewId) {
+  if (!state.user) return;
+  viewRoot.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Загрузка...</p></div>';
+  
+  try {
+    if (state.user.role === 'participant') {
+      if (viewId === 'dashboard') await loadParticipantDashboard();
+      else if (viewId === 'programs') await loadParticipantPrograms();
+      else if (viewId === 'achievements') await loadAchievements();
+    } else {
+      if (viewId === 'dashboard') await loadCreatorDashboard();
+      else if (viewId === 'programs') await loadCreatorPrograms();
+      else if (viewId === 'builder') await loadBuilder();
+    }
+  } catch (e) {
+    viewRoot.innerHTML = `<div class="card"><p class="subtle">Ошибка: ${escapeHtml(e.message)}</p></div>`;
+  }
+}
+
+async function loadParticipantDashboard() {
+  topbarTitle.textContent = 'Личный кабинет';
+  topbarLabel.textContent = 'Участник';
+  const data = await api.get('/api/participant/dashboard');
+  
+  viewRoot.innerHTML = `
+    <section class="stats-grid">
+      <div class="stat-card"><div class="eyebrow">Марафонов</div><div class="stat-value">${data.stats.programs_joined||0}</div></div>
+      <div class="stat-card"><div class="eyebrow">Уроков</div><div class="stat-value">${data.stats.total_completed||0}</div></div>
+      <div class="stat-card"><div class="eyebrow">XP</div><div class="stat-value">${data.stats.total_xp||0}</div></div>
+      <div class="stat-card"><div class="eyebrow">Серия</div><div class="stat-value">${data.stats.best_streak||0}</div></div>
+    </section>
+    <section class="card">
+      <div class="card-header"><h3>🎯 Активные марафоны</h3></div>
+      ${data.active_programs.length ? `<div class="program-grid">${data.active_programs.map(p => renderProgramCard(p, false)).join('')}</div>` : '<p class="subtle">Нет активных марафонов. Используйте кнопку "+ Код".</p>'}
+    </section>
+    ${data.achievements.length ? `
+    <section class="card">
+      <div class="card-header"><h3>🏆 Последние достижения</h3></div>
+      <div class="achievements-grid">${data.achievements.slice(0,4).map(a => `
+        <div class="achievement-card unlocked"><div class="achievement-icon">${escapeHtml(a.icon)}</div><div class="achievement-title">${escapeHtml(a.title)}</div></div>
+      `).join('')}</div>
+    </section>` : ''}
+  `;
+}
+
+async function loadParticipantPrograms() {
+  topbarTitle.textContent = 'Мои марафоны';
+  topbarLabel.textContent = 'Каталог';
+  const programs = await api.get('/api/participant/programs');
+  viewRoot.innerHTML = `<section class="card"><div class="program-grid">${programs.map(p => renderProgramCard(p, false)).join('')}</div></section>`;
+  bindProgramClicks();
+}
+
+async function loadAchievements() {
+  topbarTitle.textContent = 'Достижения';
+  const data = await api.get('/api/participant/dashboard');
+  viewRoot.innerHTML = `<section class="card"><div class="achievements-grid">${data.achievements.map(a => `
+    <div class="achievement-card unlocked"><div class="achievement-icon">${escapeHtml(a.icon)}</div><div class="achievement-title">${escapeHtml(a.title)}</div><div class="achievement-desc subtle">${escapeHtml(a.description)}</div></div>
+  `).join('')}</div></section>`;
+}
+
+async function loadCreatorDashboard() {
+  topbarTitle.textContent = 'Панель создателя';
+  topbarLabel.textContent = 'Организатор';
+  const programs = await api.get('/api/creator/programs');
+  viewRoot.innerHTML = `
+    <section class="card">
+      <div class="card-header"><h3>📚 Ваши марафоны</h3></div>
+      ${programs.length ? `<div class="program-grid">${programs.map(p => renderProgramCard(p, true)).join('')}</div>` : '<p class="subtle">Нет марафонов. Создайте первый!</p>'}
+    </section>`;
+  bindProgramClicks();
+}
+
+async function loadCreatorPrograms() {
+  topbarTitle.textContent = 'Управление марафонами';
+  topbarLabel.textContent = 'Список';
+  const programs = await api.get('/api/creator/programs');
+  viewRoot.innerHTML = `<section class="card"><div class="program-grid">${programs.map(p => renderProgramCard(p, true)).join('')}</div></section>`;
+  bindProgramClicks();
+}
+
+async function loadBuilder() {
+  topbarTitle.textContent = 'Конструктор';
+  topbarLabel.textContent = 'Структура курса';
+  viewRoot.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h3>Выберите марафон для редактирования</h3>
+      </div>
+      <div id="builder-select" class="program-grid"></div>
+    </div>`;
+  
+  const programs = await api.get('/api/creator/programs');
+  const container = $('#builder-select');
+  if(!programs.length) {
+    container.innerHTML = '<p class="subtle">Сначала создайте марафон в разделе "Мои марафоны"</p>';
     return;
   }
+  container.innerHTML = programs.map(p => `
+    <article class="card program-card" style="cursor:pointer" onclick="openProgramBuilder(${p.id})">
+      <div class="program-cover">${escapeHtml(initials(p.name))}</div>
+      <div><strong>${escapeHtml(p.name)}</strong><p class="subtle">${p.modules_count||0} модулей • ${p.lessons_count||0} уроков</p></div>
+    </article>
+  `).join('');
+}
 
-  const roleButton = event.target.closest("[data-role]");
-  if (roleButton) {
-    setRole(roleButton.dataset.role);
+// === Components ===
+function renderProgramCard(program, isCreator) {
+  return `
+    <article class="card program-card" data-program-id="${program.id}">
+      <div class="program-cover">${escapeHtml(initials(program.name))}</div>
+      <div>
+        <strong>${escapeHtml(program.name)}</strong>
+        <div class="program-meta" style="margin:8px 0">
+          <span class="badge ${program.status==='active'?'badge-success':'badge-warning'}">${program.status}</span>
+          ${isCreator ? `<span class="subtle">${program.enrolled_count||0} уч.</span>` : `<span class="subtle">${program.progress_percent||0}%</span>`}
+        </div>
+        <div class="button-row" style="gap:8px; margin-top:12px">
+          ${isCreator ? `
+            <button class="btn-secondary btn-sm" onclick="event.stopPropagation(); openProgramBuilder(${program.id})">Конструктор</button>
+            <button class="btn-ghost btn-sm" onclick="event.stopPropagation(); openEditProgram(${program.id})">Настроить</button>
+          ` : `<button class="btn-primary btn-sm" onclick="event.stopPropagation(); openParticipantView(${program.id})">Открыть</button>`}
+        </div>
+      </div>
+    </article>`;
+}
+
+function bindProgramClicks() {
+  document.querySelectorAll('.program-card').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      if (state.user.role === 'creator') openProgramBuilder(el.dataset.programId);
+      else openParticipantView(el.dataset.programId);
+    });
+  });
+}
+
+// === Participant View ===
+window.openParticipantView = async (id) => {
+  state.currentProgram = id;
+  topbarTitle.textContent = 'Марафон';
+  viewRoot.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+  
+  try {
+    const data = await api.get(`/api/programs/${id}/structure`);
+    let html = `
+      <div class="card">
+        <div class="card-header">
+          <div><h2>${escapeHtml(data.program.name)}</h2><p class="subtle">${escapeHtml(data.program.goal_text)}</p></div>
+          <div style="text-align:right"><div class="eyebrow">Прогресс</div><strong>${data.progress}%</strong></div>
+        </div>
+      </div>
+      <div class="module-list">
+    `;
+    
+    data.modules.forEach(mod => {
+      html += `
+        <article class="module-card">
+          <div class="module-header">
+            <strong>${escapeHtml(mod.title)}</strong>
+            <span class="badge ${mod.status==='available'?'badge-success':'badge-warning'}">${mod.status==='available'?'Доступен':'Закрыт'}</span>
+          </div>
+          <div class="module-body"><p class="subtle">${escapeHtml(mod.description||'')}</p>
+          <div class="lesson-list">
+      `;
+      mod.lessons.forEach(les => {
+        const statusIcon = les.status === 'completed' ? '✅' : les.status === 'in_progress' ? '⏳' : '🔒';
+        html += `
+          <div class="lesson-item ${les.status}" onclick="openLessonModal(${les.id})">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span style="font-size:1.2rem">${statusIcon}</span>
+              <div><strong>${escapeHtml(les.title)}</strong><div class="subtle" style="font-size:0.85rem">${les.estimated_minutes} мин • ${les.points} XP</div></div>
+            </div>
+            <span>→</span>
+          </div>
+        `;
+      });
+      html += `</div></div></article>`;
+    });
+    
+    html += `</div>`;
+    viewRoot.innerHTML = html;
+  } catch (e) {
+    viewRoot.innerHTML = `<div class="card"><p class="subtle">Ошибка: ${e.message}</p></div>`;
+  }
+};
+
+window.openLessonModal = async (lessonId) => {
+  // Находим урок в текущей структуре (упрощено: перезагружаем структуру или храним в state)
+  // Для простоты демо: просто заглушка модального окна с действиями
+  const data = await api.get(`/api/programs/${state.currentProgram}/structure`);
+  let lesson = null;
+  data.modules.forEach(m => { const l = m.lessons.find(x => x.id === lessonId); if(l) lesson = l; });
+  if(!lesson) return;
+
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>${escapeHtml(lesson.title)}</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <div class="lesson-body" style="padding:24px">
+        <div class="lesson-content">${lesson.content_html || '<p>Текст урока...</p>'}</div>
+        ${lesson.attachments.length ? `<div class="attachments-list" style="margin:16px 0">${lesson.attachments.map(a => `<a href="/uploads/${a.filename}" class="attachment-item" download>📎 ${a.original_name}</a>`).join('')}</div>` : ''}
+        
+        <div class="lesson-actions" style="display:flex;gap:8px;margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+          ${lesson.status !== 'completed' ? `<button class="btn-primary" onclick="updateProgress(${lessonId}, 'completed')">Завершить урок</button>` : '<button class="btn-secondary" disabled>✅ Завершено</button>'}
+          ${lesson.status === 'available' ? `<button class="btn-secondary" onclick="updateProgress(${lessonId}, 'in_progress')">Начать</button>` : ''}
+        </div>
+
+        <div class="rating-section" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <span class="subtle">Оценка:</span>
+          <div class="stars" style="display:inline-flex;gap:4px;margin-left:8px">
+            ${[1,2,3,4,5].map(r => `<button style="background:none;border:none;font-size:1.5rem;cursor:pointer;color:${r<=lesson.my_rating?'var(--accent)':'#ccc'}" onclick="rateLesson(${lessonId},${r})">★</button>`).join('')}
+          </div>
+        </div>
+
+        <div class="comments-section" style="margin-top:20px">
+          <h4>Комментарии</h4>
+          <div style="max-height:200px;overflow-y:auto;margin:8px 0">
+            ${lesson.comments.map(c => `<div class="comment-item" style="background:#f9fafb;padding:8px;border-radius:8px;margin-bottom:8px"><strong>${escapeHtml(c.full_name)}</strong>: ${escapeHtml(c.content)}</div>`).join('')}
+          </div>
+          <form onsubmit="addComment(event, ${lessonId})"><textarea name="content" placeholder="Комментарий..." required style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px"></textarea><button type="submit" class="btn-ghost" style="margin-top:4px">Отправить</button></form>
+        </div>
+      </div>
+    </div>
+  `);
+};
+
+window.updateProgress = async (lid, status) => {
+  await api.post(`/api/lessons/${lid}/progress`, { status, progress: status==='completed'?100:0 });
+  showToast(status==='completed'?'Урок завершен!':'В процессе');
+  closeModal();
+  openParticipantView(state.currentProgram);
+};
+
+window.rateLesson = async (lid, rating) => {
+  await api.post(`/api/lessons/${lid}/rating`, { rating });
+  showToast('Спасибо за оценку!');
+  openLessonModal(lid); // Refresh
+};
+
+window.addComment = async (e, lid) => {
+  e.preventDefault();
+  const content = e.target.content.value;
+  await api.post(`/api/lessons/${lid}/comments`, { content });
+  e.target.reset();
+  showToast('Комментарий добавлен');
+  openLessonModal(lid);
+};
+
+// === Creator Builder (Full CRUD) ===
+window.openProgramBuilder = async (id) => {
+  state.currentProgram = id;
+  topbarTitle.textContent = 'Конструктор';
+  viewRoot.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h3>Модули и Уроки</h3>
+        <button class="btn-primary" onclick="openCreateModule()">+ Модуль</button>
+      </div>
+      <div id="modules-container" class="module-list"><div class="loading-state"><div class="spinner"></div></div></div>
+    </div>`;
+  await loadModulesList();
+};
+
+async function loadModulesList() {
+  try {
+    state.modulesData = await api.get(`/api/programs/${state.currentProgram}/modules`);
+    renderModules();
+  } catch (e) { $('#modules-container').innerHTML = `<p class="subtle">Ошибка: ${e.message}</p>`; }
+}
+
+function renderModules() {
+  const container = $('#modules-container');
+  if (!state.modulesData.length) {
+    container.innerHTML = '<p class="subtle" style="padding:20px;text-align:center">Нет модулей. Создайте первый!</p>';
     return;
   }
+  container.innerHTML = state.modulesData.map(mod => `
+    <div class="module-card" style="border:1px solid var(--border);border-radius:12px;margin-bottom:16px;overflow:hidden">
+      <div class="module-header" style="background:#f9fafb;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
+        <div><strong style="font-size:1.1rem">${escapeHtml(mod.title)}</strong><span class="subtle" style="margin-left:8px;font-size:0.85rem">${mod.description||''}</span></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-ghost btn-sm" onclick="openEditModule(${mod.id})">✏️</button>
+          <button class="btn-ghost btn-sm" style="color:var(--danger)" onclick="confirmDeleteModule(${mod.id})">🗑️</button>
+          <button class="btn-primary btn-sm" onclick="openCreateLesson(${mod.id})">+ Урок</button>
+        </div>
+      </div>
+      <div class="module-body" style="padding:12px 16px">
+        ${mod.lessons.length ? mod.lessons.map(les => `
+          <div class="lesson-item" style="display:flex;justify-content:space-between;align-items:center;padding:10px;border-bottom:1px solid #eee">
+            <div><strong>${escapeHtml(les.title)}</strong><div class="subtle" style="font-size:0.8rem">${les.estimated_minutes} мин • ${les.points} XP</div></div>
+            <div style="display:flex;gap:8px">
+              <button class="btn-ghost btn-sm" onclick="openEditLesson(${les.id})">✏️</button>
+              <button class="btn-ghost btn-sm" style="color:var(--danger)" onclick="confirmDeleteLesson(${les.id})">🗑️</button>
+            </div>
+          </div>
+        `).join('') : '<p class="subtle" style="padding:8px">Нет уроков</p>'}
+      </div>
+    </div>
+  `).join('');
+}
 
-  const closeModalButton = event.target.closest("[data-close-modal]");
-  if (closeModalButton) {
-    closeModal();
-    return;
-  }
+// Module Actions
+window.openCreateModule = () => {
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>Новый модуль</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <form id="form-module" class="form-body">
+        <label>Название<input name="title" required></label>
+        <label>Описание<textarea name="description"></textarea></label>
+        <label>Дата открытия<input type="date" name="unlock_date"></label>
+        <button type="submit" class="btn-primary" style="width:100%">Создать</button>
+      </form>
+    </div>`);
+  $('#form-module').onsubmit = async (e) => {
+    e.preventDefault();
+    await api.post(`/api/programs/${state.currentProgram}/modules`, Object.fromEntries(new FormData(e.target)));
+    closeModal(); loadModulesList(); showToast('Модуль создан');
+  };
+};
 
-  const actionButton = event.target.closest("[data-action]");
-  if (!actionButton || state.busy) return;
+window.openEditModule = async (id) => {
+  const mod = state.modulesData.find(m => m.id === id);
+  if (!mod) return;
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>Редактировать модуль</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <form id="form-module-edit" class="form-body">
+        <label>Название<input name="title" value="${escapeHtml(mod.title)}" required></label>
+        <label>Описание<textarea name="description">${escapeHtml(mod.description||'')}</textarea></label>
+        <label>Дата открытия<input type="date" name="unlock_date" value="${mod.unlock_date||''}"></label>
+        <button type="submit" class="btn-primary" style="width:100%">Сохранить</button>
+      </form>
+    </div>`);
+  $('#form-module-edit').onsubmit = async (e) => {
+    e.preventDefault();
+    await api.post(`/api/modules/${id}/update`, Object.fromEntries(new FormData(e.target)));
+    closeModal(); loadModulesList(); showToast('Изменения сохранены');
+  };
+};
 
-  const action = actionButton.dataset.action;
-  const id = Number(actionButton.dataset.id || actionButton.dataset.taskId || 0);
+window.confirmDeleteModule = async (id) => {
+  if (!confirm('Удалить модуль и все уроки внутри?')) return;
+  await api.post(`/api/modules/${id}/delete`);
+  loadModulesList(); showToast('Модуль удален');
+};
 
-  if (action === "complete-task") {
-    await performRequest(`/api/participant-tasks/${id}/complete`);
-    showToast("Задача отмечена выполненной");
-    return;
-  }
+// Lesson Actions
+window.openCreateLesson = (moduleId) => {
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>Новый урок</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <form id="form-lesson" class="form-body">
+        <label>Название<input name="title" required></label>
+        <label>Контент (HTML)<textarea name="content_html" style="height:100px"></textarea></label>
+        <div class="form-grid">
+          <label>XP<input type="number" name="points" value="100"></label>
+          <label>Минуты<input type="number" name="estimated_minutes" value="15"></label>
+        </div>
+        <label>Дата открытия<input type="date" name="unlock_date"></label>
+        <button type="submit" class="btn-primary" style="width:100%">Добавить урок</button>
+      </form>
+    </div>`);
+  $('#form-lesson').onsubmit = async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    data.points = parseInt(data.points); data.estimated_minutes = parseInt(data.estimated_minutes);
+    await api.post(`/api/modules/${moduleId}/lessons`, data);
+    closeModal(); loadModulesList(); showToast('Урок добавлен');
+  };
+};
 
-  if (action === "soft-return") {
-    await performRequest(`/api/participant-tasks/${id}/soft-return`);
-    showToast("Мягкий возврат активирован");
-    return;
-  }
+window.openEditLesson = async (id) => {
+  let lesson = null;
+  state.modulesData.forEach(m => { const l = m.lessons.find(x => x.id === id); if(l) lesson = l; });
+  if (!lesson) return;
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>Редактировать урок</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <form id="form-lesson-edit" class="form-body">
+        <label>Название<input name="title" value="${escapeHtml(lesson.title)}" required></label>
+        <label>Контент (HTML)<textarea name="content_html" style="height:100px">${escapeHtml(lesson.content_html||'')}</textarea></label>
+        <div class="form-grid">
+          <label>XP<input type="number" name="points" value="${lesson.points}"></label>
+          <label>Минуты<input type="number" name="estimated_minutes" value="${lesson.estimated_minutes}"></label>
+        </div>
+        <label>Дата открытия<input type="date" name="unlock_date" value="${lesson.unlock_date||''}"></label>
+        <button type="submit" class="btn-primary" style="width:100%">Сохранить</button>
+      </form>
+    </div>`);
+  $('#form-lesson-edit').onsubmit = async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    data.points = parseInt(data.points); data.estimated_minutes = parseInt(data.estimated_minutes);
+    await api.post(`/api/lessons/${id}/update`, data);
+    closeModal(); loadModulesList(); showToast('Урок обновлен');
+  };
+};
 
-  if (action === "open-report") {
-    openReportModal(id);
-    return;
-  }
+window.confirmDeleteLesson = async (id) => {
+  if (!confirm('Удалить урок?')) return;
+  await api.post(`/api/lessons/${id}/delete`);
+  loadModulesList(); showToast('Урок удален');
+};
 
-  if (action === "notification-read") {
-    await performRequest(`/api/notifications/${id}/read`);
-    showToast("Уведомление помечено прочитанным");
-    return;
-  }
+window.openEditProgram = async (id) => {
+  showToast('Функция редактирования настроек марафона в разработке', true);
+};
 
-  if (action === "duplicate-program") {
-    await performRequest(`/api/programs/${id}/duplicate`);
-    showToast("Программа клонирована");
+// === Global Events ===
+$('#create-program-btn')?.addEventListener('click', () => {
+  openModal(`
+    <div class="modal-content">
+      <div class="modal-header"><h3>Новый марафон</h3><button class="modal-close" data-close-modal>&times;</button></div>
+      <form id="form-program" class="form-body">
+        <label>Название<input name="name" required></label>
+        <label>Описание<textarea name="description" required></textarea></label>
+        <label>Цель<input name="goal_text" required></label>
+        <div class="form-grid">
+          <label>Старт<input type="date" name="start_date" required></label>
+          <label>Финиш<input type="date" name="end_date" required></label>
+        </div>
+        <button type="submit" class="btn-primary" style="width:100%">Создать</button>
+      </form>
+    </div>`);
+  $('#form-program').onsubmit = async (e) => {
+    e.preventDefault();
+    const res = await api.post('/api/programs', Object.fromEntries(new FormData(e.target)));
+    closeModal(); showToast(`Марафон создан! Код: ${res.invitation_code}`);
+    loadView('dashboard');
+  };
+});
+
+$('#join-code-btn')?.addEventListener('click', async () => {
+  const code = prompt('Введите код приглашения:');
+  if (!code) return;
+  try {
+    // Используем POST с телом для совместимости с нашей логикой, хотя API поддерживает и GET
+    await api.post('/api/programs/join', { code }); 
+    showToast('Вы присоединились к марафону! 🎉');
+    loadView('programs');
+  } catch (e) { showToast(e.message, true); }
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-close-modal]') || e.target === modal) closeModal();
+  const navBtn = e.target.closest('.nav-btn');
+  if (navBtn) setView(navBtn.dataset.view);
+});
+
+$('#login-form')?.addEventListener('submit', (e) => { e.preventDefault(); login(Object.fromEntries(new FormData(e.target))); });
+$('#register-form')?.addEventListener('submit', (e) => { e.preventDefault(); register(Object.fromEntries(new FormData(e.target))); });
+$('#logout-btn')?.addEventListener('click', () => { if(confirm('Выйти?')) logout(); });
+
+// === ЭТОТ БЛОК НУЖНО ДОБАВИТЬ В КОНЕЦ ФАЙЛА ===
+
+document.addEventListener("DOMContentLoaded", () => {
+  // 1. ЛОГИКА ПЕРЕКЛЮЧЕНИЯ ВКЛАДОК ВХОД / РЕГИСТРАЦИЯ
+  const loginForm = document.getElementById('login-form');
+  const registerForm = document.getElementById('register-form');
+  const tabButtons = document.querySelectorAll('.tab-btn');
+
+  if (loginForm && registerForm && tabButtons.length) {
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        // Переключаем активный класс
+        tabButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Показываем нужную форму
+        const tab = btn.dataset.tab;
+        if (tab === 'login') {
+          loginForm.classList.remove('hidden');
+          registerForm.classList.add('hidden');
+        } else {
+          loginForm.classList.add('hidden');
+          registerForm.classList.remove('hidden');
+        }
+      });
+    });
+
+    // Обработчик отправки формы входа (вызывает твою функцию login)
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await login(Object.fromEntries(new FormData(loginForm)));
+    });
+
+    // Обработчик отправки формы регистрации (вызывает твою функцию register)
+    registerForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await register(Object.fromEntries(new FormData(registerForm)));
+    });
   }
 });
 
-document.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (state.busy) return;
-
-  const form = event.target;
-  const formData = new FormData(form);
-  const payload = Object.fromEntries(formData.entries());
-
-  if (form.id === "report-form") {
-    payload.participantTaskId = Number(payload.participantTaskId);
-    await performRequest("/api/reports", payload);
-    showToast("Отчёт отправлен и прогресс обновлён");
-    return;
-  }
-
-  if (form.id === "branding-form") {
-    await performRequest("/api/settings/branding", payload);
-    showToast("Брендинг обновлён");
-    return;
-  }
-
-  if (form.id === "module-form") {
-    await performRequest("/api/builder/modules", payload);
-    form.reset();
-    showToast("Модуль добавлен в программу");
-    return;
-  }
-
-  if (form.id === "task-form") {
-    payload.moduleId = Number(payload.moduleId);
-    payload.points = Number(payload.points);
-    payload.estimatedMinutes = Number(payload.estimatedMinutes);
-    await performRequest("/api/builder/tasks", payload);
-    form.reset();
-    showToast("Задание добавлено в поток");
-    return;
-  }
-
-  if (form.id === "challenge-form") {
-    payload.targetPerWeek = Number(payload.targetPerWeek);
-    payload.targetTeamSize = Number(payload.targetTeamSize);
-    payload.durationWeeks = Number(payload.durationWeeks);
-    await performRequest("/api/private-challenges", payload);
-    form.reset();
-    showToast("Приватный челлендж создан");
-  }
-});
-
-resetDemoButton.addEventListener("click", async () => {
-  if (state.busy) return;
-  await performRequest("/api/reset-demo");
-  showToast("Демо сброшено к начальному состоянию");
-});
-
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    closeModal();
-  }
-});
-
-loadState();
+// Init
+checkAuth();
