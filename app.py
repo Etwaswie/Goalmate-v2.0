@@ -77,6 +77,34 @@ ROLE_CAPABILITIES = {
 ORGANIZER_MEMBERSHIP_ROLES = {"owner", "admin", "curator"}
 PROGRAM_ORGANIZER_MEMBERSHIP_ROLES = {"organizer", "curator"}
 PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES = {"participant"}
+PROGRAM_STATUS_META = {
+    "draft": {
+        "label": "Draft",
+        "tone": "neutral",
+        "description": "Поток ещё собирается и не зафиксирован как готовый к запуску.",
+    },
+    "ready": {
+        "label": "Ready",
+        "tone": "info",
+        "description": "Бренд, контент и invite flow собраны. Поток можно запускать.",
+    },
+    "active": {
+        "label": "Active",
+        "tone": "success",
+        "description": "Поток уже запущен и используется как живая программа.",
+    },
+    "archived": {
+        "label": "Archived",
+        "tone": "neutral",
+        "description": "Поток закрыт и остаётся как шаблон или исторический запуск.",
+    },
+}
+PROGRAM_STATUS_TRANSITIONS = {
+    "draft": {"ready", "active", "archived"},
+    "ready": {"active", "archived"},
+    "active": {"archived"},
+    "archived": {"draft"},
+}
 
 CONTENT_PACKS = [
     {
@@ -902,72 +930,25 @@ def build_launch_center(
     modules: list[dict],
     invitation_codes: list[dict],
 ) -> dict:
-    module_count = len(modules)
-    task_count = sum(len(module["tasks"]) for module in modules)
-    active_codes = [item for item in invitation_codes if int(item["is_active"]) == 1 and item["remaining_uses"] > 0]
-    latest_code = active_codes[0] if active_codes else (invitation_codes[0] if invitation_codes else None)
-    total_remaining_uses = sum(item["remaining_uses"] for item in active_codes)
-
-    preview_participant = None
-    if context.user_id is not None:
-        preview_participant = conn.execute(
-            """
-            SELECT participant_id
-            FROM program_memberships
-            WHERE program_id = ? AND user_id = ? AND role = 'participant' AND participant_id IS NOT NULL
-            ORDER BY id ASC
-            LIMIT 1
-            """,
-            (context.program_id, context.user_id),
-        ).fetchone()
-    preview_participant_id = preview_participant["participant_id"] if preview_participant is not None else None
-
-    if preview_participant_id is None:
-        external_participants = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM enrollments
-            WHERE program_id = ?
-            """,
-            (context.program_id,),
-        ).fetchone()["count"]
-        external_reports = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM reports r
-            JOIN tasks t ON t.id = r.task_id
-            WHERE t.program_id = ?
-            """,
-            (context.program_id,),
-        ).fetchone()["count"]
-    else:
-        external_participants = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM enrollments
-            WHERE program_id = ? AND participant_id != ?
-            """,
-            (context.program_id, preview_participant_id),
-        ).fetchone()["count"]
-        external_reports = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM reports r
-            JOIN tasks t ON t.id = r.task_id
-            WHERE t.program_id = ? AND r.participant_id != ?
-            """,
-            (context.program_id, preview_participant_id),
-        ).fetchone()["count"]
-
-    branding_ready = bool(
-        str(organizer.get("brand_name", "")).strip()
-        and str(organizer.get("support_email", "")).strip()
-        and str(organizer.get("tagline", "")).strip()
+    launch_signals = collect_launch_signals(conn, context, organizer, program, modules, invitation_codes)
+    module_count = launch_signals["moduleCount"]
+    task_count = launch_signals["taskCount"]
+    active_codes = launch_signals["activeCodes"]
+    latest_code = launch_signals["latestCode"]
+    total_remaining_uses = launch_signals["totalRemainingUses"]
+    branding_ready = launch_signals["brandingReady"]
+    content_ready = launch_signals["contentReady"]
+    invite_ready = launch_signals["inviteReady"]
+    participant_ready = launch_signals["participantReady"]
+    report_ready = launch_signals["reportReady"]
+    external_participants = launch_signals["externalParticipants"]
+    external_reports = launch_signals["externalReports"]
+    lifecycle = build_program_lifecycle(
+        str(program.get("status", "draft")),
+        branding_ready=branding_ready,
+        content_ready=content_ready,
+        invite_ready=invite_ready,
     )
-    content_ready = module_count >= 2 and task_count >= 4
-    invite_ready = len(active_codes) >= 1
-    participant_ready = external_participants >= 1
-    report_ready = external_reports >= 1
 
     checklist = [
         {
@@ -1037,6 +1018,189 @@ def build_launch_center(
         "shareCopy": share_copy,
         "checklist": checklist,
         "nextStep": next_step,
+        "foundationReady": lifecycle["foundationReady"],
+        "lifecycle": lifecycle,
+    }
+
+
+def get_program_status_meta(status: str) -> dict[str, str]:
+    normalized = str(status or "draft").strip().lower()
+    meta = PROGRAM_STATUS_META.get(normalized, PROGRAM_STATUS_META["draft"])
+    return {
+        "key": normalized,
+        "label": meta["label"],
+        "tone": meta["tone"],
+        "description": meta["description"],
+    }
+
+
+def collect_launch_signals(
+    conn: sqlite3.Connection,
+    context: RequestContext,
+    organizer: dict,
+    program: dict,
+    modules: list[dict],
+    invitation_codes: list[dict],
+) -> dict:
+    module_count = len(modules)
+    task_count = sum(len(module["tasks"]) for module in modules)
+    active_codes = [item for item in invitation_codes if int(item["is_active"]) == 1 and item["remaining_uses"] > 0]
+    latest_code = active_codes[0] if active_codes else None
+    total_remaining_uses = sum(item["remaining_uses"] for item in active_codes)
+
+    preview_participant = None
+    if context.user_id is not None:
+        preview_participant = conn.execute(
+            """
+            SELECT participant_id
+            FROM program_memberships
+            WHERE program_id = ? AND user_id = ? AND role = 'participant' AND participant_id IS NOT NULL
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (context.program_id, context.user_id),
+        ).fetchone()
+    preview_participant_id = preview_participant["participant_id"] if preview_participant is not None else None
+
+    if preview_participant_id is None:
+        external_participants = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM enrollments
+            WHERE program_id = ?
+            """,
+            (context.program_id,),
+        ).fetchone()["count"]
+        external_reports = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM reports r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE t.program_id = ?
+            """,
+            (context.program_id,),
+        ).fetchone()["count"]
+    else:
+        external_participants = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM enrollments
+            WHERE program_id = ? AND participant_id != ?
+            """,
+            (context.program_id, preview_participant_id),
+        ).fetchone()["count"]
+        external_reports = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM reports r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE t.program_id = ? AND r.participant_id != ?
+            """,
+            (context.program_id, preview_participant_id),
+        ).fetchone()["count"]
+
+    branding_ready = bool(
+        str(organizer.get("brand_name", "")).strip()
+        and str(organizer.get("support_email", "")).strip()
+        and str(organizer.get("tagline", "")).strip()
+    )
+    content_ready = module_count >= 2 and task_count >= 4
+    invite_ready = len(active_codes) >= 1
+    participant_ready = external_participants >= 1
+    report_ready = external_reports >= 1
+
+    return {
+        "moduleCount": module_count,
+        "taskCount": task_count,
+        "activeCodes": active_codes,
+        "latestCode": latest_code,
+        "totalRemainingUses": total_remaining_uses,
+        "externalParticipants": external_participants,
+        "externalReports": external_reports,
+        "brandingReady": branding_ready,
+        "contentReady": content_ready,
+        "inviteReady": invite_ready,
+        "participantReady": participant_ready,
+        "reportReady": report_ready,
+    }
+
+
+def build_program_lifecycle(
+    status: str,
+    *,
+    branding_ready: bool,
+    content_ready: bool,
+    invite_ready: bool,
+) -> dict:
+    foundation_ready = bool(branding_ready and content_ready and invite_ready)
+    blocked_by: list[str] = []
+    if not branding_ready:
+        blocked_by.append("бренд и support email")
+    if not content_ready:
+        blocked_by.append("минимум 2 модуля и 4 задания")
+    if not invite_ready:
+        blocked_by.append("хотя бы один активный invite code")
+
+    meta = get_program_status_meta(status)
+    actions: list[dict[str, str]] = []
+    guidance = meta["description"]
+
+    if meta["key"] == "draft":
+        if foundation_ready:
+            guidance = "Основа потока собрана. Можно зафиксировать ready или сразу перевести поток в active."
+            actions = [
+                {
+                    "status": "ready",
+                    "label": "Пометить как ready",
+                    "tone": "info",
+                },
+                {
+                    "status": "active",
+                    "label": "Запустить поток",
+                    "tone": "success",
+                },
+            ]
+        else:
+            guidance = "Поток пока в draft. Сначала закрой бренд, контент и invite flow, потом переходи к запуску."
+    elif meta["key"] == "ready":
+        guidance = "Поток уже собран и ждёт явного запуска. Следующий шаг — перевести его в active."
+        actions = [
+            {
+                "status": "active",
+                "label": "Запустить поток",
+                "tone": "success",
+            },
+            {
+                "status": "archived",
+                "label": "Увести в архив",
+                "tone": "danger",
+            },
+        ]
+    elif meta["key"] == "active":
+        guidance = "Поток уже в live-режиме. Архивируй его, когда запуск закончится или нужно заморозить invite flow."
+        actions = [
+            {
+                "status": "archived",
+                "label": "Архивировать поток",
+                "tone": "danger",
+            }
+        ]
+    elif meta["key"] == "archived":
+        guidance = "Архивный поток не считается текущим запуском. Верни его в draft, если хочешь собрать новый цикл на той же структуре."
+        actions = [
+            {
+                "status": "draft",
+                "label": "Вернуть в draft",
+                "tone": "info",
+            }
+        ]
+
+    return {
+        **meta,
+        "foundationReady": foundation_ready,
+        "blockedBy": blocked_by,
+        "actions": actions,
+        "guidance": guidance,
     }
 
 
@@ -1738,7 +1902,7 @@ def create_organizer_workspace(
         """
         INSERT INTO programs (
             organizer_id, source_program_id, name, slug, description, audience, start_date, end_date, status
-        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'active')
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'draft')
         """,
         (
             organizer_id,
@@ -2173,6 +2337,15 @@ def create_invitation_code(payload: dict, context: RequestContext | None = None)
     expires_at = str(payload.get("expiresAt", "")).strip() or None
 
     with connect_db() as conn:
+        program = conn.execute(
+            "SELECT status FROM programs WHERE id = ? AND organizer_id = ?",
+            (context.program_id, context.organizer_id),
+        ).fetchone()
+        if program is None:
+            raise ValueError("Поток не найден")
+        if str(program["status"] or "draft").strip().lower() == "archived":
+            raise ValueError("Сначала верни поток из архива в draft, потом создавай новые invite code")
+
         code = generate_invitation_code()
         while conn.execute("SELECT id FROM invitation_codes WHERE code = ?", (code,)).fetchone() is not None:
             code = generate_invitation_code()
@@ -4049,6 +4222,70 @@ def duplicate_program(program_id: int, context: RequestContext | None = None) ->
     return get_bootstrap_state(context)
 
 
+def update_program_status(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    target_status = str(payload.get("status", "")).strip().lower()
+    if target_status not in PROGRAM_STATUS_META:
+        raise ValueError("Неизвестный статус потока")
+
+    with connect_db() as conn:
+        program = conn.execute(
+            "SELECT * FROM programs WHERE id = ? AND organizer_id = ?",
+            (context.program_id, context.organizer_id),
+        ).fetchone()
+        if program is None:
+            raise ValueError("Поток не найден")
+
+        current_status = str(program["status"] or "draft").strip().lower()
+        if target_status == current_status:
+            return get_bootstrap_state(context)
+
+        allowed_transitions = PROGRAM_STATUS_TRANSITIONS.get(current_status, set())
+        if target_status not in allowed_transitions:
+            raise ValueError(f"Нельзя перевести поток из {current_status} в {target_status}")
+
+        organizer = conn.execute(
+            "SELECT * FROM organizers WHERE id = ? LIMIT 1",
+            (context.organizer_id,),
+        ).fetchone()
+        if organizer is None:
+            raise ValueError("Организатор не найден")
+
+        launch_signals = collect_launch_signals(
+            conn,
+            context,
+            row_to_dict(organizer),
+            row_to_dict(program),
+            get_modules_with_tasks(conn, context.program_id),
+            get_program_invitation_codes(conn, context.program_id),
+        )
+        foundation_ready = bool(
+            launch_signals["brandingReady"]
+            and launch_signals["contentReady"]
+            and launch_signals["inviteReady"]
+        )
+        if target_status in {"ready", "active"} and not foundation_ready:
+            raise ValueError("Сначала закрой бренд, контент и invite flow, потом меняй статус потока")
+
+        conn.execute(
+            "UPDATE programs SET status = ? WHERE id = ?",
+            (target_status, context.program_id),
+        )
+        if target_status == "archived":
+            conn.execute(
+                """
+                UPDATE invitation_codes
+                SET is_active = 0
+                WHERE program_id = ?
+                """,
+                (context.program_id,),
+            )
+        conn.commit()
+    return get_bootstrap_state(context)
+
+
 def update_branding(payload: dict, context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
     require_capability(context, "organizer")
@@ -4285,6 +4522,9 @@ class GoalMateHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings/branding":
                 self.send_json({"ok": True, "data": update_branding(payload, context)})
+                return
+            if path == "/api/programs/status":
+                self.send_json({"ok": True, "data": update_program_status(payload, context)})
                 return
             if path == "/api/private-challenges":
                 self.send_json({"ok": True, "data": create_private_challenge(payload, context)})

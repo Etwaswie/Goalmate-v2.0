@@ -81,6 +81,20 @@ function roleLabel(role) {
   return "Общий";
 }
 
+function programStatusMeta(status) {
+  const mapping = {
+    draft: { label: "Черновик", badge: "neutral" },
+    ready: { label: "Готов", badge: "info" },
+    active: { label: "Активен", badge: "success" },
+    archived: { label: "Архив", badge: "neutral" },
+  };
+  return mapping[status] || { label: String(status || "draft"), badge: "neutral" };
+}
+
+function programStatusLabel(status) {
+  return programStatusMeta(status).label;
+}
+
 function availableRoles() {
   const roles = state.me?.availableRoles;
   return Array.isArray(roles) && roles.length ? roles : ["participant", "organizer"];
@@ -372,7 +386,7 @@ function renderAuthPanel() {
               .map(
                 (scope) => `
                   <option value="${scope.programId}" ${scope.programId === currentProgramId ? "selected" : ""}>
-                    ${escapeHtml(scope.programName)} · ${escapeHtml((scope.availableRoles || []).join(" / "))} · ${escapeHtml(scope.programStatus)}
+                    ${escapeHtml(scope.programName)} · ${escapeHtml((scope.availableRoles || []).join(" / "))} · ${escapeHtml(programStatusLabel(scope.programStatus))}
                   </option>
                 `
               )
@@ -477,6 +491,7 @@ function renderNotificationCard(item) {
 
 function renderHero() {
   const { program, participant, participantBoard } = state.app;
+  const statusMeta = programStatusMeta(program.status);
   return `
     <section class="hero">
       <div class="hero-grid">
@@ -485,6 +500,7 @@ function renderHero() {
           <h2>${escapeHtml(program.name)}</h2>
           <p>${escapeHtml(program.description)}</p>
           <div class="hero-actions" style="margin-top:18px">
+            <span class="chip">${escapeHtml(statusMeta.label)}</span>
             <span class="chip">Прогресс ${escapeHtml(participant.progress_percent)}%</span>
             <span class="chip">Ранг #${escapeHtml(participant.rank)}</span>
             <span class="chip">${escapeHtml(participant.xp)} XP</span>
@@ -826,6 +842,7 @@ function renderOrganizerView() {
   const { organizerDashboard, organizer } = state.app;
   const launchCenter = organizerDashboard.launchCenter;
   const latestCode = launchCenter?.latestCode;
+  const lifecycle = launchCenter?.lifecycle;
   const recommendedPack = !launchCenter?.checklist?.find((item) => item.id === "content" && item.done)
     ? state.app?.builder?.contentPacks?.[0]
     : null;
@@ -845,6 +862,49 @@ function renderOrganizerView() {
           <div class="progress-fill" style="width:${escapeHtml(launchCenter.readinessPercent)}%"></div>
         </div>
         <div class="list-stack" style="margin-top:18px">
+          <div class="list-box">
+            <div class="task-head">
+              <div>
+                <strong>Lifecycle потока</strong>
+                <p class="subtle">${escapeHtml(lifecycle.description)}</p>
+              </div>
+              <span class="badge ${escapeHtml(lifecycle.tone)}">${escapeHtml(programStatusLabel(lifecycle.key))}</span>
+            </div>
+            <p class="subtle">${escapeHtml(lifecycle.guidance)}</p>
+            ${
+              lifecycle.blockedBy?.length
+                ? `<p class="subtle">Сейчас блокирует: ${escapeHtml(lifecycle.blockedBy.join(" • "))}</p>`
+                : ""
+            }
+            ${
+              lifecycle.actions?.length
+                ? `
+                  <div class="button-row" style="margin-top:12px">
+                    ${lifecycle.actions
+                      .map(
+                        (action) => `
+                          <button
+                            class="${
+                              action.tone === "success"
+                                ? "primary-button"
+                                : action.tone === "danger"
+                                  ? "inline-button danger-button"
+                                  : "inline-button"
+                            }"
+                            type="button"
+                            data-action="set-program-status"
+                            data-status="${escapeHtml(action.status)}"
+                          >
+                            ${escapeHtml(action.label)}
+                          </button>
+                        `
+                      )
+                      .join("")}
+                  </div>
+                `
+                : ""
+            }
+          </div>
           ${launchCenter.checklist
             .map(
               (item) => `
@@ -1014,8 +1074,10 @@ function renderOrganizerView() {
 
 function renderBuilderView() {
   const { builder } = state.app;
-  const latestInviteCode = builder.invitationCodes?.[0];
+  const latestActiveInviteCode = builder.invitationCodes?.find((item) => item.is_active && item.remaining_uses > 0);
+  const latestInviteCode = latestActiveInviteCode || builder.invitationCodes?.[0];
   const launchCenter = state.app.organizerDashboard.launchCenter;
+  const lifecycle = launchCenter.lifecycle;
   return `
     ${renderHero()}
     <section class="org-grid">
@@ -1026,6 +1088,15 @@ function renderBuilderView() {
             <h3>Структура текущего марафона</h3>
           </div>
           <button class="secondary-button" type="button" data-action="duplicate-program" data-id="${state.app.program.id}">Клонировать поток</button>
+        </div>
+        <div class="list-box" style="margin-top:18px">
+          <div class="task-head">
+            <div>
+              <strong>Статус текущего потока</strong>
+              <div class="subtle">${escapeHtml(lifecycle.guidance)}</div>
+            </div>
+            <span class="badge ${escapeHtml(lifecycle.tone)}">${escapeHtml(programStatusLabel(lifecycle.key))}</span>
+          </div>
         </div>
         <div class="module-stack" style="margin-top:18px">
           ${builder.modules
@@ -1094,13 +1165,19 @@ function renderBuilderView() {
           <div class="list-box">
             <div class="task-head">
               <div>
-                <strong>${latestInviteCode ? escapeHtml(latestInviteCode.code) : "Нет активного invite code"}</strong>
-                <div class="subtle">${latestInviteCode ? `Осталось ${escapeHtml(latestInviteCode.remaining_uses)} / ${escapeHtml(latestInviteCode.max_uses)} использований` : "Создай первый код и отправь его участникам."}</div>
+                <strong>${latestActiveInviteCode ? escapeHtml(latestActiveInviteCode.code) : "Нет активного invite code"}</strong>
+                <div class="subtle">${
+                  latestActiveInviteCode
+                    ? `Осталось ${escapeHtml(latestActiveInviteCode.remaining_uses)} / ${escapeHtml(latestActiveInviteCode.max_uses)} использований`
+                    : latestInviteCode
+                      ? "Раньше коды уже были, но сейчас все они неактивны. Создай новый invite code перед запуском."
+                      : "Создай первый код и отправь его участникам."
+                }</div>
               </div>
               <span class="badge ${launchCenter.activeInviteCount > 0 ? "success" : "warning"}">${escapeHtml(launchCenter.activeInviteCount)} active</span>
             </div>
             <div class="button-row" style="margin-top:12px">
-              ${latestInviteCode ? `<button class="inline-button" type="button" data-action="copy-invite" data-code="${escapeHtml(latestInviteCode.code)}">Копировать текст приглашения</button>` : ""}
+              ${latestActiveInviteCode ? `<button class="inline-button" type="button" data-action="copy-invite" data-code="${escapeHtml(latestActiveInviteCode.code)}">Копировать текст приглашения</button>` : ""}
               <button class="inline-button" type="button" data-action="goto-view" data-view="organizer">Открыть launch center</button>
             </div>
           </div>
@@ -1161,7 +1238,7 @@ function renderBuilderView() {
                   <div class="task-head">
                     <div>
                       <strong>${escapeHtml(program.name)}</strong>
-                      <div class="subtle">${escapeHtml(program.status)} • ${escapeHtml(program.module_count)} модулей • ${escapeHtml(program.task_count)} задач</div>
+                      <div class="subtle">${escapeHtml(programStatusLabel(program.status))} • ${escapeHtml(program.module_count)} модулей • ${escapeHtml(program.task_count)} задач</div>
                     </div>
                     <button class="inline-button" type="button" data-action="duplicate-program" data-id="${program.id}">Дублировать</button>
                   </div>
@@ -1847,6 +1924,14 @@ document.addEventListener("click", async (event) => {
   if (action === "duplicate-program") {
     await performRequest(`/api/programs/${id}/duplicate`);
     showToast("Программа клонирована");
+    return;
+  }
+
+  if (action === "set-program-status") {
+    const status = actionButton.dataset.status;
+    if (!status) return;
+    await performRequest("/api/programs/status", { status });
+    showToast(`Статус потока обновлён: ${programStatusLabel(status)}`);
     return;
   }
 
