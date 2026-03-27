@@ -1396,6 +1396,45 @@ function renderModal() {
         </div>
         <button class="secondary-button" type="submit">Зарегистрироваться и войти</button>
       </form>
+      <form id="organizer-register-form" style="margin-top:18px">
+        <div class="table-toolbar">
+          <div>
+            <div class="eyebrow">Новый организатор</div>
+            <h3>Создать бренд и первый поток</h3>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label>
+            Имя
+            <input name="fullName" placeholder="Например: Мария Волкова" required />
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" placeholder="founder@example.com" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" placeholder="Минимум 8 символов" minlength="8" required />
+          </label>
+          <label>
+            Бренд / проект
+            <input name="brandName" placeholder="Например: Habit Power" required />
+          </label>
+          <label>
+            Первый поток
+            <input name="programName" placeholder="Например: Весенний wellness-марафон" required />
+          </label>
+          <label>
+            Тэглайн
+            <input name="tagline" placeholder="Короткое обещание для лендинга" />
+          </label>
+        </div>
+        <label>
+          Описание потока
+          <textarea name="programDescription" placeholder="Для кого этот поток, какую боль решает и какой результат обещает."></textarea>
+        </label>
+        <button class="secondary-button" type="submit">Создать организаторский workspace</button>
+      </form>
       <div class="list-stack" style="margin-top:18px">
         ${credentialRows}
       </div>
@@ -1548,6 +1587,19 @@ document.addEventListener("submit", async (event) => {
     if (response) {
       const joinedProgramName = response.joinedProgram?.name || "новый поток";
       showToast(`Аккаунт создан, вход выполнен: ${joinedProgramName}`);
+    }
+    return;
+  }
+
+  if (form.id === "organizer-register-form") {
+    const response = await performAuthRequest("/api/auth/register-organizer", payload);
+    if (response) {
+      state.currentRole = "organizer";
+      state.currentView = "organizer";
+      render();
+      const brandName = response.workspace?.brandName || "новый бренд";
+      const code = response.workspace?.invitationCode;
+      showToast(code ? `Workspace создан: ${brandName}. Первый invite code: ${code}` : `Workspace создан: ${brandName}`);
     }
     return;
   }

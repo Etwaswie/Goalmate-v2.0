@@ -1383,6 +1383,201 @@ def attach_user_to_program_via_code(
     }
 
 
+def create_organizer_workspace(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    full_name: str,
+    email: str,
+    brand_name: str,
+    program_name: str,
+    program_description: str,
+    tagline: str,
+) -> dict:
+    today = date.today()
+    start_date = str(today)
+    end_date = str(today + timedelta(days=21))
+    organizer_cursor = conn.execute(
+        """
+        INSERT INTO organizers (
+            name, email, brand_name, primary_color, accent_color, support_email, tagline
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            full_name,
+            email,
+            brand_name,
+            "#10A37F",
+            "#FF8A3D",
+            email,
+            tagline,
+        ),
+    )
+    organizer_id = int(organizer_cursor.lastrowid)
+
+    participant_cursor = conn.execute(
+        """
+        INSERT INTO participants (
+            full_name, email, city, bio, avatar_bg, streak_days, last_active_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+        """,
+        (
+            full_name,
+            email,
+            "Не указан",
+            "Создатель первого потока в GoalMate.",
+            "#D4E8FF",
+            now_iso(),
+        ),
+    )
+    participant_id = int(participant_cursor.lastrowid)
+
+    slug = f"program-{secrets.token_hex(4)}"
+    while conn.execute("SELECT id FROM programs WHERE slug = ?", (slug,)).fetchone() is not None:
+        slug = f"program-{secrets.token_hex(4)}"
+
+    program_cursor = conn.execute(
+        """
+        INSERT INTO programs (
+            organizer_id, source_program_id, name, slug, description, audience, start_date, end_date, status
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'active')
+        """,
+        (
+            organizer_id,
+            program_name,
+            slug,
+            program_description,
+            "Self-serve B2B cohort",
+            start_date,
+            end_date,
+        ),
+    )
+    program_id = int(program_cursor.lastrowid)
+
+    conn.execute(
+        """
+        INSERT INTO organization_memberships (
+            user_id, organizer_id, role, is_default, created_at
+        ) VALUES (?, ?, 'owner', 1, ?)
+        """,
+        (user_id, organizer_id, now_iso()),
+    )
+    conn.execute(
+        """
+        INSERT INTO program_memberships (
+            user_id, program_id, participant_id, role, is_default, created_at
+        ) VALUES (?, ?, NULL, 'organizer', 1, ?)
+        """,
+        (user_id, program_id, now_iso()),
+    )
+    conn.execute(
+        """
+        INSERT INTO program_memberships (
+            user_id, program_id, participant_id, role, is_default, created_at
+        ) VALUES (?, ?, ?, 'participant', 0, ?)
+        """,
+        (user_id, program_id, participant_id, now_iso()),
+    )
+
+    module_cursor = conn.execute(
+        """
+        INSERT INTO modules (
+            program_id, title, description, week_label, position
+        ) VALUES (?, ?, ?, ?, 1)
+        """,
+        (
+            program_id,
+            "Старт потока",
+            "Первый блок для проверки onboarding, invite flow и базового прогресса.",
+            "Неделя 1",
+        ),
+    )
+    module_id = int(module_cursor.lastrowid)
+
+    task_cursor = conn.execute(
+        """
+        INSERT INTO tasks (
+            program_id, module_id, title, description, task_type, submission_mode,
+            points, estimated_minutes, scheduled_for, position, soft_return_copy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            program_id,
+            module_id,
+            "Проверить welcome-flow участника",
+            "Открой поток как участник, зайди в задачи и проверь, что invite code приводит в нужную программу.",
+            "onboarding",
+            "text",
+            50,
+            10,
+            start_date,
+            "Если день перегружен, просто зафиксируй один рабочий инсайт по onboarding.",
+        ),
+    )
+    task_id = int(task_cursor.lastrowid)
+
+    conn.execute(
+        """
+        INSERT INTO enrollments (
+            program_id, participant_id, role, progress_percent, xp, completed_tasks,
+            total_tasks, soft_return_count, at_risk, joined_at
+        ) VALUES (?, ?, 'participant', 0, 0, 0, 1, 0, 0, ?)
+        """,
+        (program_id, participant_id, now_iso()),
+    )
+
+    team_cursor = conn.execute(
+        """
+        INSERT INTO teams (program_id, name, goal_text, progress_percent)
+        VALUES (?, ?, ?, 0)
+        """,
+        (
+            program_id,
+            "Core team",
+            "Проверить первый запуск GoalMate без ручной сборки костылей.",
+        ),
+    )
+    team_id = int(team_cursor.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO team_members (team_id, participant_id, is_captain)
+        VALUES (?, ?, 1)
+        """,
+        (team_id, participant_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO participant_tasks (
+            task_id, participant_id, status, progress_percent, report_required,
+            soft_return_available, planned_for, completed_at, last_interaction_at
+        ) VALUES (?, ?, 'planned', 0, 1, 1, ?, NULL, ?)
+        """,
+        (task_id, participant_id, start_date, now_iso()),
+    )
+
+    invitation_code = generate_invitation_code()
+    while conn.execute("SELECT id FROM invitation_codes WHERE code = ?", (invitation_code,)).fetchone() is not None:
+        invitation_code = generate_invitation_code()
+    conn.execute(
+        """
+        INSERT INTO invitation_codes (
+            program_id, code, max_uses, used_count, expires_at, is_active, created_at
+        ) VALUES (?, ?, 200, 0, NULL, 1, ?)
+        """,
+        (program_id, invitation_code, now_iso()),
+    )
+
+    available_roles = ("participant", "organizer")
+    return {
+        "organizer_id": organizer_id,
+        "program_id": program_id,
+        "participant_id": participant_id,
+        "available_roles": available_roles,
+        "primary_role": "organizer",
+        "invitation_code": invitation_code,
+    }
+
+
 def register_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> tuple[dict, str]:
     full_name = str(payload.get("fullName", payload.get("full_name", ""))).strip()
     email = str(payload.get("email", "")).strip().lower()
@@ -1428,6 +1623,72 @@ def register_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) 
         },
         "code": code,
         "registered": True,
+    }, build_session_cookie(token)
+
+
+def register_organizer_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> tuple[dict, str]:
+    full_name = str(payload.get("fullName", payload.get("full_name", ""))).strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
+    brand_name = str(payload.get("brandName", "")).strip()
+    program_name = str(payload.get("programName", "")).strip()
+    program_description = str(payload.get("programDescription", "")).strip() or (
+        "Первый поток в GoalMate, созданный через self-serve onboarding для организатора."
+    )
+    tagline = str(payload.get("tagline", "")).strip() or "Поток собирается без костылей и ручной рутины."
+
+    if not full_name or not email or not password or not brand_name or not program_name:
+        raise ValueError("Нужны имя, email, пароль, бренд и название первого потока")
+    if len(password) < 8:
+        raise ValueError("Пароль должен быть не короче 8 символов")
+
+    with connect_db() as conn:
+        existing_user = conn.execute(
+            "SELECT id FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        if existing_user is not None:
+            raise ValueError("Пользователь с таким email уже существует")
+
+        user_cursor = conn.execute(
+            """
+            INSERT INTO users (
+                email, password_hash, full_name, user_type, is_active, created_at, last_login_at
+            ) VALUES (?, ?, ?, 'organizer', 1, ?, NULL)
+            """,
+            (email, hash_password(password), full_name, now_iso()),
+        )
+        user_id = int(user_cursor.lastrowid)
+
+        workspace = create_organizer_workspace(
+            conn,
+            user_id=user_id,
+            full_name=full_name,
+            email=email,
+            brand_name=brand_name,
+            program_name=program_name,
+            program_description=program_description,
+            tagline=tagline,
+        )
+        token = create_authenticated_session(conn, user_id, workspace, handler)
+        conn.commit()
+
+    resolved_context = resolve_session_context_from_token(token)
+    if resolved_context is None:
+        raise ValueError("Не удалось создать сессию для организатора")
+    return {
+        "me": get_me_state(resolved_context),
+        "bootstrap": get_bootstrap_state(resolved_context),
+        "workspace": {
+            "organizerId": workspace["organizer_id"],
+            "programId": workspace["program_id"],
+            "participantId": workspace["participant_id"],
+            "brandName": brand_name,
+            "programName": program_name,
+            "invitationCode": workspace["invitation_code"],
+        },
+        "registered": True,
+        "preferredRole": "organizer",
     }, build_session_cookie(token)
 
 
@@ -3242,6 +3503,10 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             if path == "/api/auth/register":
                 auth_payload, session_cookie = register_user(payload, self)
+                self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
+            if path == "/api/auth/register-organizer":
+                auth_payload, session_cookie = register_organizer_user(payload, self)
                 self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
                 return
             if path == "/api/auth/login":
