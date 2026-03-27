@@ -122,6 +122,17 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS participants (
+    id INTEGER PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    city TEXT NOT NULL,
+    bio TEXT NOT NULL,
+    avatar_bg TEXT NOT NULL,
+    streak_days INTEGER NOT NULL DEFAULT 0,
+    last_active_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS user_contexts (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -202,17 +213,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     soft_return_copy TEXT NOT NULL,
     FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE,
     FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS participants (
-    id INTEGER PRIMARY KEY,
-    full_name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    city TEXT NOT NULL,
-    bio TEXT NOT NULL,
-    avatar_bg TEXT NOT NULL,
-    streak_days INTEGER NOT NULL DEFAULT 0,
-    last_active_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS program_memberships (
