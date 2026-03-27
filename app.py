@@ -78,6 +78,141 @@ ORGANIZER_MEMBERSHIP_ROLES = {"owner", "admin", "curator"}
 PROGRAM_ORGANIZER_MEMBERSHIP_ROLES = {"organizer", "curator"}
 PROGRAM_PARTICIPANT_MEMBERSHIP_ROLES = {"participant"}
 
+CONTENT_PACKS = [
+    {
+        "key": "starter-flow",
+        "title": "Starter flow",
+        "description": "Быстрый старт нового потока: welcome, цель участника, первый check-in и мягкий возврат.",
+        "outcome": "Даёт каркас для запуска первого потока без ручной сборки с нуля.",
+        "modules": [
+            {
+                "title": "Старт потока",
+                "description": "Первые касания, чтобы участник понял правила игры и быстро получил первую победу.",
+                "week_label": "Неделя 1",
+                "tasks": [
+                    {
+                        "title": "Welcome: зафиксируй личную цель",
+                        "description": "Попроси участника коротко описать, зачем он пришёл в поток и какой результат хочет получить.",
+                        "task_type": "reflection",
+                        "submission_mode": "text",
+                        "points": 80,
+                        "estimated_minutes": 7,
+                        "day_offset": 0,
+                        "soft_return_copy": "Если день скомкался, вернись одной фразой о своей цели без чувства провала.",
+                    },
+                    {
+                        "title": "Представься мини-команде",
+                        "description": "Первое короткое касание с командой, чтобы включить accountability уже в начале потока.",
+                        "task_type": "accountability",
+                        "submission_mode": "text",
+                        "points": 60,
+                        "estimated_minutes": 5,
+                        "day_offset": 0,
+                        "soft_return_copy": "Можно вернуться коротким сообщением в 2 строки и всё равно включиться в команду.",
+                    },
+                ],
+            },
+            {
+                "title": "Ритм без перегруза",
+                "description": "Лёгкая структура середины недели, чтобы участник не потерял темп после первого дня.",
+                "week_label": "Неделя 1",
+                "tasks": [
+                    {
+                        "title": "Первый ежедневный check-in",
+                        "description": "Зафиксируй один шаг дня и покажи, что прогресс виден даже в маленьком действии.",
+                        "task_type": "checkin",
+                        "submission_mode": "checklist",
+                        "points": 90,
+                        "estimated_minutes": 6,
+                        "day_offset": 1,
+                        "soft_return_copy": "Если не получилось вовремя, вернись с одним галочкой-чек-ином вместо полного отчёта.",
+                    },
+                    {
+                        "title": "Мягкий возврат за 5 минут",
+                        "description": "Отдельный шаг, который учит участника не выпадать после пропуска и быстро возвращаться в ритм.",
+                        "task_type": "soft_return",
+                        "submission_mode": "text",
+                        "points": 70,
+                        "estimated_minutes": 5,
+                        "day_offset": 2,
+                        "soft_return_copy": "Просто зафиксируй один минимальный шаг возврата и продолжай без самобичевания.",
+                    },
+                ],
+            },
+        ],
+    },
+    {
+        "key": "accountability-pack",
+        "title": "Accountability pack",
+        "description": "Командная механика и доказательство действия, чтобы участники держались не только на силе воли.",
+        "outcome": "Усиливает сообщество и делает прогресс социально видимым.",
+        "modules": [
+            {
+                "title": "Командная accountability",
+                "description": "Два шага, которые связывают участника с другим человеком и снижают шанс отвалиться в тишине.",
+                "week_label": "Неделя 2",
+                "tasks": [
+                    {
+                        "title": "Отправь proof другу или куратору",
+                        "description": "Участник сдаёт простой proof-of-work вместо идеального отчёта.",
+                        "task_type": "proof",
+                        "submission_mode": "photo",
+                        "points": 110,
+                        "estimated_minutes": 8,
+                        "day_offset": 3,
+                        "soft_return_copy": "Если не успел, сдай одно фото-доказательство и продолжай поток дальше.",
+                    },
+                    {
+                        "title": "Сформулируй обязательство недели",
+                        "description": "Короткое обещание команде, которое можно проверить фактами через несколько дней.",
+                        "task_type": "commitment",
+                        "submission_mode": "text",
+                        "points": 85,
+                        "estimated_minutes": 6,
+                        "day_offset": 4,
+                        "soft_return_copy": "Вернись одной конкретной формулировкой, без длинных объяснений.",
+                    },
+                ],
+            },
+        ],
+    },
+    {
+        "key": "reflection-pack",
+        "title": "Reflection pack",
+        "description": "Завершение недели через рефлексию и план следующего шага вместо бесконечного догоняния.",
+        "outcome": "Помогает красиво закрывать неделю и удерживать ощущение прогресса.",
+        "modules": [
+            {
+                "title": "Рефлексия и удержание",
+                "description": "Финальный блок недели, который собирает результаты и превращает их в следующий шаг.",
+                "week_label": "Неделя 3",
+                "tasks": [
+                    {
+                        "title": "Итоги недели в одном экране",
+                        "description": "Участник собирает 3 факта прогресса, чтобы увидеть реальный результат, а не шум.",
+                        "task_type": "reflection",
+                        "submission_mode": "text",
+                        "points": 95,
+                        "estimated_minutes": 9,
+                        "day_offset": 5,
+                        "soft_return_copy": "Если неделя была тяжёлой, зафиксируй хотя бы один факт прогресса и этого уже достаточно.",
+                    },
+                    {
+                        "title": "План следующего минимального шага",
+                        "description": "Вместо общего намерения участник фиксирует один обязательный шаг на завтра.",
+                        "task_type": "planning",
+                        "submission_mode": "text",
+                        "points": 65,
+                        "estimated_minutes": 4,
+                        "day_offset": 6,
+                        "soft_return_copy": "Оставь один следующий шаг, а не идеальный план всей недели.",
+                    },
+                ],
+            },
+        ],
+    },
+]
+
 
 class AuthorizationError(Exception):
     """Raised when the current context is not allowed to perform an action."""
@@ -740,6 +875,153 @@ def get_program_invitation_codes(conn: sqlite3.Connection, program_id: int) -> l
         item["remaining_uses"] = max(int(item["max_uses"]) - int(item["used_count"]), 0)
         codes.append(item)
     return codes
+
+
+def get_content_pack_catalog() -> list[dict]:
+    catalog: list[dict] = []
+    for pack in CONTENT_PACKS:
+        task_count = sum(len(module["tasks"]) for module in pack["modules"])
+        catalog.append(
+            {
+                "key": pack["key"],
+                "title": pack["title"],
+                "description": pack["description"],
+                "outcome": pack["outcome"],
+                "moduleCount": len(pack["modules"]),
+                "taskCount": task_count,
+            }
+        )
+    return catalog
+
+
+def build_launch_center(
+    conn: sqlite3.Connection,
+    context: RequestContext,
+    organizer: dict,
+    program: dict,
+    modules: list[dict],
+    invitation_codes: list[dict],
+) -> dict:
+    module_count = len(modules)
+    task_count = sum(len(module["tasks"]) for module in modules)
+    active_codes = [item for item in invitation_codes if int(item["is_active"]) == 1 and item["remaining_uses"] > 0]
+    latest_code = active_codes[0] if active_codes else (invitation_codes[0] if invitation_codes else None)
+    total_remaining_uses = sum(item["remaining_uses"] for item in active_codes)
+
+    preview_participant = None
+    if context.user_id is not None:
+        preview_participant = conn.execute(
+            """
+            SELECT participant_id
+            FROM program_memberships
+            WHERE program_id = ? AND user_id = ? AND role = 'participant' AND participant_id IS NOT NULL
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (context.program_id, context.user_id),
+        ).fetchone()
+    preview_participant_id = preview_participant["participant_id"] if preview_participant is not None else None
+
+    external_participants = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM enrollments
+        WHERE program_id = ?
+          AND (? IS NULL OR participant_id != ?)
+        """,
+        (context.program_id, preview_participant_id, preview_participant_id),
+    ).fetchone()["count"]
+
+    external_reports = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM reports r
+        JOIN tasks t ON t.id = r.task_id
+        WHERE t.program_id = ?
+          AND (? IS NULL OR r.participant_id != ?)
+        """,
+        (context.program_id, preview_participant_id, preview_participant_id),
+    ).fetchone()["count"]
+
+    branding_ready = bool(
+        str(organizer.get("brand_name", "")).strip()
+        and str(organizer.get("support_email", "")).strip()
+        and str(organizer.get("tagline", "")).strip()
+    )
+    content_ready = module_count >= 2 and task_count >= 4
+    invite_ready = len(active_codes) >= 1
+    participant_ready = external_participants >= 1
+    report_ready = external_reports >= 1
+
+    checklist = [
+        {
+            "id": "brand",
+            "title": "Настрой бренд и promise",
+            "description": "Проверь brand name, support email и тэглайн, чтобы invite flow вёл в понятный продукт.",
+            "done": branding_ready,
+            "actionView": "organizer",
+            "actionLabel": "Открыть брендинг",
+        },
+        {
+            "id": "content",
+            "title": "Собери базовый контент потока",
+            "description": "Минимум 2 модуля и 4 задания, чтобы участник не попадал в пустой workspace после регистрации.",
+            "done": content_ready,
+            "actionView": "builder",
+            "actionLabel": "Добавить контент",
+        },
+        {
+            "id": "invites",
+            "title": "Подготовь invite flow",
+            "description": "Нужен хотя бы один активный код приглашения с запасом использований.",
+            "done": invite_ready,
+            "actionView": "builder",
+            "actionLabel": "Сгенерировать код",
+        },
+        {
+            "id": "participants",
+            "title": "Приведи первого живого участника",
+            "description": "Как только в потоке появится внешний участник, можно реально валидировать onboarding и retention.",
+            "done": participant_ready,
+            "actionView": "builder",
+            "actionLabel": "Открыть invite flow",
+        },
+        {
+            "id": "reports",
+            "title": "Дождись первого отчёта",
+            "description": "После первого отчёта уже видно, работает ли путь участника и что улучшать в следующей итерации.",
+            "done": report_ready,
+            "actionView": "organizer",
+            "actionLabel": "Смотреть отчёты",
+        },
+    ]
+
+    completed_steps = sum(1 for item in checklist if item["done"])
+    next_step = next((item for item in checklist if not item["done"]), None)
+    readiness_percent = round(100 * completed_steps / max(len(checklist), 1))
+
+    share_copy = None
+    if latest_code is not None:
+        share_copy = (
+            f"Присоединяйся к потоку \"{program['name']}\" от {organizer['brand_name']} через GoalMate. "
+            f"Код приглашения: {latest_code['code']}"
+        )
+
+    return {
+        "readinessPercent": readiness_percent,
+        "completedSteps": completed_steps,
+        "totalSteps": len(checklist),
+        "moduleCount": module_count,
+        "taskCount": task_count,
+        "activeInviteCount": len(active_codes),
+        "totalRemainingUses": total_remaining_uses,
+        "externalParticipants": external_participants,
+        "externalReports": external_reports,
+        "latestCode": latest_code,
+        "shareCopy": share_copy,
+        "checklist": checklist,
+        "nextStep": next_step,
+    }
 
 
 def resolve_participant_id_for_user(
@@ -2772,6 +3054,9 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
         completion_rate = round(sum(row["progress_percent"] for row in leaderboard_rows) / max(len(leaderboard_rows), 1), 1)
         today_focus = sum(1 for task in participant_tasks if task["status"] in {"completed", "in_progress"})
         total_focus = len(participant_tasks)
+        builder_modules = get_modules_with_tasks(conn, context.program_id)
+        invitation_codes = get_program_invitation_codes(conn, context.program_id)
+        launch_center = build_launch_center(conn, context, organizer, program, builder_modules, invitation_codes)
 
         return {
             "meta": {
@@ -2827,6 +3112,7 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
                 "recentReports": recent_reports,
                 "atRiskParticipants": at_risk,
                 "hoursSavedPerWeek": 5.6,
+                "launchCenter": launch_center,
                 "smartTriggers": [
                     {
                         "title": "Автоматический мягкий возврат",
@@ -2843,9 +3129,10 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
                 ],
             },
             "builder": {
-                "modules": get_modules_with_tasks(conn, context.program_id),
+                "modules": builder_modules,
                 "reusablePrograms": reusable_programs,
-                "invitationCodes": get_program_invitation_codes(conn, context.program_id),
+                "invitationCodes": invitation_codes,
+                "contentPacks": get_content_pack_catalog(),
             },
             "analytics": {
                 "dailyMetrics": metrics,
@@ -2917,6 +3204,115 @@ def touch_participant(conn: sqlite3.Connection, participant_id: int) -> None:
         "UPDATE participants SET last_active_at = ? WHERE id = ?",
         (now_iso(), participant_id),
     )
+
+
+def next_module_position(conn: sqlite3.Connection, program_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM modules WHERE program_id = ?",
+        (program_id,),
+    ).fetchone()["next_position"]
+
+
+def next_task_position(conn: sqlite3.Connection, module_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM tasks WHERE module_id = ?",
+        (module_id,),
+    ).fetchone()["next_position"]
+
+
+def insert_module_record(
+    conn: sqlite3.Connection,
+    program_id: int,
+    title: str,
+    description: str,
+    week_label: str,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO modules (program_id, title, description, week_label, position)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            program_id,
+            title,
+            description or "Новый блок в конструкторе GoalMate.",
+            week_label or "Новая неделя",
+            next_module_position(conn, program_id),
+        ),
+    )
+    return cursor.lastrowid
+
+
+def insert_task_record(
+    conn: sqlite3.Connection,
+    context: RequestContext,
+    module_id: int,
+    title: str,
+    description: str,
+    task_type: str,
+    submission_mode: str,
+    points: int,
+    estimated_minutes: int,
+    scheduled_for: str,
+    soft_return_copy: str,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO tasks (
+            program_id, module_id, title, description, task_type, submission_mode,
+            points, estimated_minutes, scheduled_for, position, soft_return_copy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            context.program_id,
+            module_id,
+            title,
+            description or "Новое задание из конструктора GoalMate.",
+            task_type,
+            submission_mode,
+            points,
+            estimated_minutes,
+            scheduled_for,
+            next_task_position(conn, module_id),
+            soft_return_copy or "Можно вернуться укороченной версией шага.",
+        ),
+    )
+    task_id = cursor.lastrowid
+
+    participants = [
+        row["participant_id"]
+        for row in conn.execute(
+            "SELECT participant_id FROM enrollments WHERE program_id = ?",
+            (context.program_id,),
+        ).fetchall()
+    ]
+    for participant_id in participants:
+        conn.execute(
+            """
+            INSERT INTO participant_tasks (
+                task_id, participant_id, status, progress_percent, report_required,
+                soft_return_available, planned_for, completed_at, last_interaction_at
+            ) VALUES (?, ?, 'planned', 0, ?, 1, ?, NULL, ?)
+            """,
+            (
+                task_id,
+                participant_id,
+                submission_requires_report(submission_mode),
+                scheduled_for,
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE enrollments
+            SET total_tasks = total_tasks + 1
+            WHERE program_id = ? AND participant_id = ?
+            """,
+            (context.program_id, participant_id),
+        )
+        refresh_progress(conn, context, participant_id)
+
+    return task_id
 
 
 def complete_task(participant_task_id: int, context: RequestContext | None = None, via_report: bool = False) -> dict:
@@ -3142,17 +3538,7 @@ def create_module(payload: dict, context: RequestContext | None = None) -> dict:
         raise ValueError("Название модуля обязательно")
 
     with connect_db() as conn:
-        position = conn.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM modules WHERE program_id = ?",
-            (context.program_id,),
-        ).fetchone()["next_position"]
-        conn.execute(
-            """
-            INSERT INTO modules (program_id, title, description, week_label, position)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (context.program_id, title, description or "Новый блок в конструкторе GoalMate.", week_label, position),
-        )
+        insert_module_record(conn, context.program_id, title, description, week_label)
         conn.commit()
     return get_bootstrap_state(context)
 
@@ -3174,62 +3560,76 @@ def create_task(payload: dict, context: RequestContext | None = None) -> dict:
         raise ValueError("Нужны модуль и название задания")
 
     with connect_db() as conn:
-        position = conn.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM tasks WHERE module_id = ?",
-            (module_id,),
-        ).fetchone()["next_position"]
-        cursor = conn.execute(
-            """
-            INSERT INTO tasks (
-                program_id, module_id, title, description, task_type, submission_mode,
-                points, estimated_minutes, scheduled_for, position, soft_return_copy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                context.program_id,
-                module_id,
-                title,
-                description or "Новое задание из конструктора GoalMate.",
-                task_type,
-                submission_mode,
-                points,
-                estimated_minutes,
-                scheduled_for,
-                position,
-                soft_return_copy,
-            ),
+        insert_task_record(
+            conn,
+            context,
+            module_id,
+            title,
+            description,
+            task_type,
+            submission_mode,
+            points,
+            estimated_minutes,
+            scheduled_for,
+            soft_return_copy,
         )
-        new_task_id = cursor.lastrowid
+        conn.commit()
+    return get_bootstrap_state(context)
 
-        participants = [row["participant_id"] for row in conn.execute(
-            "SELECT participant_id FROM enrollments WHERE program_id = ?",
-            (context.program_id,),
-        ).fetchall()]
-        for participant_id in participants:
-            conn.execute(
-                """
-                INSERT INTO participant_tasks (
-                    task_id, participant_id, status, progress_percent, report_required,
-                    soft_return_available, planned_for, completed_at, last_interaction_at
-                ) VALUES (?, ?, 'planned', 0, ?, 1, ?, NULL, ?)
-                """,
-                (
-                    new_task_id,
-                    participant_id,
-                    submission_requires_report(submission_mode),
-                    scheduled_for,
-                    now_iso(),
-                ),
+
+def apply_content_pack(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    template_key = str(payload.get("templateKey", "")).strip()
+    template = next((item for item in CONTENT_PACKS if item["key"] == template_key), None)
+    if template is None:
+        raise ValueError("Неизвестный content pack")
+
+    with connect_db() as conn:
+        existing_module_titles = {
+            row["title"]
+            for row in conn.execute(
+                "SELECT title FROM modules WHERE program_id = ?",
+                (context.program_id,),
+            ).fetchall()
+        }
+        existing_task_titles = {
+            row["title"]
+            for row in conn.execute(
+                "SELECT title FROM tasks WHERE program_id = ?",
+                (context.program_id,),
+            ).fetchall()
+        }
+        template_task_titles = [task["title"] for module in template["modules"] for task in module["tasks"]]
+        if all(module["title"] in existing_module_titles for module in template["modules"]) and all(
+            title in existing_task_titles for title in template_task_titles
+        ):
+            raise ValueError("Этот content pack уже добавлен в поток")
+
+        for module in template["modules"]:
+            module_id = insert_module_record(
+                conn,
+                context.program_id,
+                module["title"],
+                module["description"],
+                module["week_label"],
             )
-            conn.execute(
-                """
-                UPDATE enrollments
-                SET total_tasks = total_tasks + 1
-                WHERE program_id = ? AND participant_id = ?
-                """,
-                (context.program_id, participant_id),
-            )
-            refresh_progress(conn, context, participant_id)
+            for task in module["tasks"]:
+                insert_task_record(
+                    conn,
+                    context,
+                    module_id,
+                    task["title"],
+                    task["description"],
+                    task["task_type"],
+                    task["submission_mode"],
+                    int(task["points"]),
+                    int(task["estimated_minutes"]),
+                    str(date.today() + timedelta(days=int(task["day_offset"]))),
+                    task["soft_return_copy"],
+                )
+
         conn.commit()
     return get_bootstrap_state(context)
 
@@ -3535,6 +3935,9 @@ class GoalMateHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/builder/tasks":
                 self.send_json({"ok": True, "data": create_task(payload, context)})
+                return
+            if path == "/api/builder/content-packs":
+                self.send_json({"ok": True, "data": apply_content_pack(payload, context)})
                 return
             if path == "/api/settings/branding":
                 self.send_json({"ok": True, "data": update_branding(payload, context)})

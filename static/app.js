@@ -222,6 +222,28 @@ async function performScopeRequest(programId) {
   }
 }
 
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.setAttribute("readonly", "true");
+  field.style.position = "absolute";
+  field.style.left = "-9999px";
+  document.body.append(field);
+  field.select();
+  document.execCommand("copy");
+  field.remove();
+}
+
+function inviteShareText(code) {
+  const programName = state.app?.program?.name || "потоку";
+  const brandName = state.app?.organizer?.brand_name || "GoalMate";
+  return `Присоединяйся к потоку "${programName}" от ${brandName} через GoalMate. Код приглашения: ${code}`;
+}
+
 function setRole(nextRole) {
   if (!canUseRole(nextRole)) {
     showToast(`Текущий аккаунт не имеет доступа к роли "${roleLabel(nextRole)}"`, true);
@@ -788,8 +810,88 @@ function renderTeamView() {
 
 function renderOrganizerView() {
   const { organizerDashboard, organizer } = state.app;
+  const launchCenter = organizerDashboard.launchCenter;
+  const latestCode = launchCenter?.latestCode;
+  const recommendedPack = !launchCenter?.checklist?.find((item) => item.id === "content" && item.done)
+    ? state.app?.builder?.contentPacks?.[0]
+    : null;
   return `
     ${renderHero()}
+    <section class="org-grid">
+      <div class="panel">
+        <div class="table-toolbar">
+          <div>
+            <div class="eyebrow">Launch center</div>
+            <h3>Что осталось до уверенного запуска потока</h3>
+          </div>
+          <span class="badge ${launchCenter.readinessPercent >= 80 ? "success" : "info"}">${escapeHtml(launchCenter.readinessPercent)}% готовности</span>
+        </div>
+        <div class="subtle" style="margin-top:8px">${escapeHtml(launchCenter.completedSteps)} из ${escapeHtml(launchCenter.totalSteps)} ключевых шагов уже закрыты. Это organizer-side flow, собранный вокруг первого запуска, а не вокруг пустого dashboard.</div>
+        <div class="progress-track" style="margin-top:18px">
+          <div class="progress-fill" style="width:${escapeHtml(launchCenter.readinessPercent)}%"></div>
+        </div>
+        <div class="list-stack" style="margin-top:18px">
+          ${launchCenter.checklist
+            .map(
+              (item) => `
+                <div class="list-box">
+                  <div class="task-head">
+                    <div>
+                      <strong>${escapeHtml(item.title)}</strong>
+                      <p class="subtle">${escapeHtml(item.description)}</p>
+                    </div>
+                    <span class="badge ${item.done ? "success" : "warning"}">${item.done ? "готово" : "нужно действие"}</span>
+                  </div>
+                  ${item.done ? "" : `<div class="button-row" style="margin-top:12px"><button class="inline-button" type="button" data-action="goto-view" data-view="${escapeHtml(item.actionView)}">${escapeHtml(item.actionLabel)}</button></div>`}
+                </div>
+              `
+            )
+            .join("")}
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="eyebrow">Приглашения и контент</div>
+        <h3>Быстрые действия вместо ручного старта</h3>
+        <div class="list-stack" style="margin-top:18px">
+          <div class="list-box">
+            <div class="task-head">
+              <div>
+                <strong>${latestCode ? escapeHtml(latestCode.code) : "Активного кода пока нет"}</strong>
+                <div class="subtle">${latestCode ? `Осталось ${escapeHtml(latestCode.remaining_uses)} / ${escapeHtml(latestCode.max_uses)} использований` : "Сначала создай invite code, чтобы можно было звать участников."}</div>
+              </div>
+              <span class="badge ${latestCode ? "success" : "neutral"}">${latestCode ? "invite ready" : "pending"}</span>
+            </div>
+            <div class="button-row" style="margin-top:12px">
+              <button class="inline-button" type="button" data-action="goto-view" data-view="builder">Открыть builder</button>
+              ${latestCode ? `<button class="inline-button" type="button" data-action="copy-invite" data-code="${escapeHtml(latestCode.code)}">Копировать текст приглашения</button>` : ""}
+            </div>
+          </div>
+          <div class="list-box">
+            <strong>Сводка запуска</strong>
+            <div class="list-stack" style="margin-top:12px">
+              <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(launchCenter.moduleCount)} модулей</strong><span class="subtle">в текущем потоке</span></div>
+              <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(launchCenter.taskCount)} задач</strong><span class="subtle">видимых участнику шагов</span></div>
+              <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(launchCenter.externalParticipants)} живых участников</strong><span class="subtle">без тестового preview-аккаунта</span></div>
+              <div class="mini-stat"><div class="status-dot"></div><strong>${escapeHtml(launchCenter.externalReports)} отчётов</strong><span class="subtle">уже прошли через flow</span></div>
+            </div>
+          </div>
+          ${recommendedPack
+            ? `
+              <div class="list-box">
+                <strong>Рекомендуемый quick-start: ${escapeHtml(recommendedPack.title)}</strong>
+                <p class="subtle">${escapeHtml(recommendedPack.description)}</p>
+                <div class="button-row" style="margin-top:12px">
+                  <button class="secondary-button" type="button" data-action="apply-content-pack" data-key="${escapeHtml(recommendedPack.key)}">Развернуть content pack</button>
+                  <button class="inline-button" type="button" data-action="goto-view" data-view="builder">Настроить вручную</button>
+                </div>
+              </div>
+            `
+            : ""}
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="eyebrow">Операционный центр организатора</div>
       <h3>Вместо Google Sheets + Telegram + ручных напоминаний</h3>
@@ -898,6 +1000,8 @@ function renderOrganizerView() {
 
 function renderBuilderView() {
   const { builder } = state.app;
+  const latestInviteCode = builder.invitationCodes?.[0];
+  const launchCenter = state.app.organizerDashboard.launchCenter;
   return `
     ${renderHero()}
     <section class="org-grid">
@@ -942,13 +1046,64 @@ function renderBuilderView() {
       </div>
 
       <div class="panel">
-        <div class="table-toolbar">
-          <div>
-            <div class="eyebrow">Invite flow</div>
-            <h3>Коды приглашения в поток</h3>
+        <div class="eyebrow">Launch kit</div>
+        <h3>Приглашения и быстрый контент</h3>
+        <form id="invite-code-form" style="margin-top:18px">
+          <div class="form-grid">
+            <label>
+              Максимум использований
+              <input name="maxUses" type="number" min="1" value="100" required />
+            </label>
+            <label>
+              Истекает
+              <input name="expiresAt" type="date" />
+            </label>
           </div>
-          <button class="secondary-button" type="button" data-action="generate-invite-code">Сгенерировать код</button>
+          <div class="button-row">
+            <button class="primary-button" type="submit">Создать invite code</button>
+            <button class="inline-button" type="button" data-action="generate-invite-code">Быстрый код без настроек</button>
+          </div>
+        </form>
+        <div class="list-stack" style="margin-top:18px">
+          <div class="list-box">
+            <div class="task-head">
+              <div>
+                <strong>${latestInviteCode ? escapeHtml(latestInviteCode.code) : "Нет активного invite code"}</strong>
+                <div class="subtle">${latestInviteCode ? `Осталось ${escapeHtml(latestInviteCode.remaining_uses)} / ${escapeHtml(latestInviteCode.max_uses)} использований` : "Создай первый код и отправь его участникам."}</div>
+              </div>
+              <span class="badge ${launchCenter.activeInviteCount > 0 ? "success" : "warning"}">${escapeHtml(launchCenter.activeInviteCount)} active</span>
+            </div>
+            <div class="button-row" style="margin-top:12px">
+              ${latestInviteCode ? `<button class="inline-button" type="button" data-action="copy-invite" data-code="${escapeHtml(latestInviteCode.code)}">Копировать текст приглашения</button>` : ""}
+              <button class="inline-button" type="button" data-action="goto-view" data-view="organizer">Открыть launch center</button>
+            </div>
+          </div>
+
+          ${builder.contentPacks
+            .map(
+              (pack) => `
+                <div class="list-box">
+                  <div class="task-head">
+                    <div>
+                      <strong>${escapeHtml(pack.title)}</strong>
+                      <div class="subtle">${escapeHtml(pack.moduleCount)} модулей • ${escapeHtml(pack.taskCount)} задач</div>
+                    </div>
+                    <button class="secondary-button" type="button" data-action="apply-content-pack" data-key="${escapeHtml(pack.key)}">Развернуть</button>
+                  </div>
+                  <p class="subtle">${escapeHtml(pack.description)}</p>
+                  <p class="subtle">${escapeHtml(pack.outcome)}</p>
+                </div>
+              `
+            )
+            .join("")}
         </div>
+      </div>
+    </section>
+
+    <section class="org-grid">
+      <div class="panel">
+        <div class="eyebrow">Invite flow</div>
+        <h3>Все коды приглашения в поток</h3>
         <div class="list-stack" style="margin-top:18px">
           ${builder.invitationCodes?.length
             ? builder.invitationCodes
@@ -990,6 +1145,7 @@ function renderBuilderView() {
             .join("")}
         </div>
       </div>
+
     </section>
 
     <section class="org-grid">
@@ -1355,7 +1511,7 @@ function renderModal() {
         </div>
         <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
       </div>
-      <p class="subtle">В staging уже можно не только входить под demo-аккаунтами, но и регистрировать нового участника сразу по invite code. Это не полный onboarding организатора, а первый рабочий вход для реального пользователя.</p>
+      <p class="subtle">В staging уже можно входить под demo-аккаунтами, регистрировать участника по invite code и создавать новый organizer workspace с первым потоком. Следующий шаг после входа теперь тоже встроен: launch center, invite flow и быстрый content starter.</p>
       <form id="login-form" style="margin-top:18px">
         <div class="form-grid">
           <label>
@@ -1532,6 +1688,14 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "goto-view") {
+    const nextView = actionButton.dataset.view;
+    if (nextView) {
+      setView(nextView);
+    }
+    return;
+  }
+
   if (action === "logout") {
     const ok = await performAuthRequest("/api/auth/logout");
     if (ok) {
@@ -1556,6 +1720,23 @@ document.addEventListener("click", async (event) => {
     await performRequest("/api/invitation-codes", { maxUses: 100 });
     const latestCode = state.app?.builder?.invitationCodes?.[0]?.code;
     showToast(latestCode ? `Новый invite code: ${latestCode}` : "Код приглашения создан");
+    return;
+  }
+
+  if (action === "apply-content-pack") {
+    const templateKey = actionButton.dataset.key;
+    await performRequest("/api/builder/content-packs", { templateKey });
+    const pack = state.app?.builder?.contentPacks?.find((item) => item.key === templateKey);
+    showToast(pack ? `В поток добавлен ${pack.title}` : "Content pack добавлен");
+    return;
+  }
+
+  if (action === "copy-invite") {
+    const code = actionButton.dataset.code;
+    if (!code) return;
+    await copyText(inviteShareText(code));
+    showToast(`Текст приглашения для ${code} скопирован`);
+    return;
   }
 });
 
@@ -1616,6 +1797,17 @@ document.addEventListener("submit", async (event) => {
   if (form.id === "branding-form") {
     await performRequest("/api/settings/branding", payload);
     showToast("Брендинг обновлён");
+    return;
+  }
+
+  if (form.id === "invite-code-form") {
+    payload.maxUses = Number(payload.maxUses);
+    if (!payload.expiresAt) {
+      delete payload.expiresAt;
+    }
+    await performRequest("/api/invitation-codes", payload);
+    const latestCode = state.app?.builder?.invitationCodes?.[0]?.code;
+    showToast(latestCode ? `Новый invite code: ${latestCode}` : "Код приглашения создан");
     return;
   }
 
