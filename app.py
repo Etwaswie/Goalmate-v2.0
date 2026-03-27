@@ -922,26 +922,42 @@ def build_launch_center(
         ).fetchone()
     preview_participant_id = preview_participant["participant_id"] if preview_participant is not None else None
 
-    external_participants = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM enrollments
-        WHERE program_id = ?
-          AND (? IS NULL OR participant_id != ?)
-        """,
-        (context.program_id, preview_participant_id, preview_participant_id),
-    ).fetchone()["count"]
-
-    external_reports = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM reports r
-        JOIN tasks t ON t.id = r.task_id
-        WHERE t.program_id = ?
-          AND (? IS NULL OR r.participant_id != ?)
-        """,
-        (context.program_id, preview_participant_id, preview_participant_id),
-    ).fetchone()["count"]
+    if preview_participant_id is None:
+        external_participants = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM enrollments
+            WHERE program_id = ?
+            """,
+            (context.program_id,),
+        ).fetchone()["count"]
+        external_reports = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM reports r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE t.program_id = ?
+            """,
+            (context.program_id,),
+        ).fetchone()["count"]
+    else:
+        external_participants = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM enrollments
+            WHERE program_id = ? AND participant_id != ?
+            """,
+            (context.program_id, preview_participant_id),
+        ).fetchone()["count"]
+        external_reports = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM reports r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE t.program_id = ? AND r.participant_id != ?
+            """,
+            (context.program_id, preview_participant_id),
+        ).fetchone()["count"]
 
     branding_ready = bool(
         str(organizer.get("brand_name", "")).strip()
