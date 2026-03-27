@@ -1599,6 +1599,7 @@ def init_db(force_reset: bool = False) -> None:
         if not has_data:
             seed_demo(conn)
         ensure_demo_auth_seed(conn)
+        ensure_demo_invitation_codes(conn)
         sync_identity_sequences(DB_SETTINGS, conn)
         conn.commit()
 
@@ -1676,6 +1677,22 @@ def ensure_demo_auth_seed(conn: sqlite3.Connection, created_at: str | None = Non
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         program_memberships,
+    )
+
+
+def ensure_demo_invitation_codes(conn: sqlite3.Connection, created_at: str | None = None) -> None:
+    created_at = created_at or now_iso()
+    invitation_codes = [
+        (1, "SPRING26", 100, 0, None, 1, created_at),
+        (2, "WINTER26", 50, 0, None, 1, created_at),
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO invitation_codes (
+            program_id, code, max_uses, used_count, expires_at, is_active, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        invitation_codes,
     )
 
 
