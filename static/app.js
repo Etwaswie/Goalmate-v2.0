@@ -283,6 +283,13 @@ function openReportModal(taskId) {
   renderModal();
 }
 
+function openLessonModal(taskId) {
+  const task = state.app?.participantBoard?.tasks?.find((item) => item.participant_task_id === taskId);
+  if (!task) return;
+  state.modal = { type: "lesson", taskId };
+  renderModal();
+}
+
 function openLoginModal() {
   state.modal = { type: "login" };
   renderModal();
@@ -416,6 +423,8 @@ function renderAvatar(person, large = false) {
 }
 
 function renderTaskCard(task) {
+  const today = new Date().toISOString().slice(0, 10);
+  const isUpcoming = task.status === "planned" && String(task.scheduled_for || "") > today;
   const reportBox = task.report_content
     ? `
       <div class="report-box">
@@ -435,6 +444,10 @@ function renderTaskCard(task) {
     actionMarkup = `<button class="secondary-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Обновить отчёт</button>`;
   } else if (task.status === "missed") {
     actionMarkup = `<button class="primary-button" type="button" data-action="soft-return" data-task-id="${task.participant_task_id}">Мягкий возврат</button>`;
+  } else if (task.status === "planned" && !isUpcoming) {
+    actionMarkup = `<button class="secondary-button" type="button" data-action="start-lesson" data-task-id="${task.participant_task_id}">Начать урок</button>`;
+  } else if (isUpcoming) {
+    actionMarkup = "";
   } else if (task.report_required) {
     actionMarkup = `<button class="primary-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Сдать отчёт</button>`;
   } else {
@@ -463,9 +476,88 @@ function renderTaskCard(task) {
       ${task.status === "missed" ? `<div class="report-box"><strong>Мягкий возврат:</strong><p class="subtle">${escapeHtml(task.soft_return_copy)}</p></div>` : ""}
       ${reportBox}
       <div class="button-row">
+        <button class="inline-button" type="button" data-action="open-lesson" data-task-id="${task.participant_task_id}">Открыть урок</button>
         ${actionMarkup}
       </div>
     </article>
+  `;
+}
+
+function lessonPrimaryAction(task, compact = false) {
+  if (!task) return "";
+  const baseClass = compact ? "inline-button" : "primary-button";
+  if (task.status === "completed") {
+    return `<button class="${baseClass}" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Обновить отчёт</button>`;
+  }
+  if (task.canSoftReturn || task.status === "missed") {
+    return `<button class="primary-button" type="button" data-action="soft-return" data-task-id="${task.participant_task_id}">Мягкий возврат</button>`;
+  }
+  if (task.canStart) {
+    return `<button class="primary-button" type="button" data-action="start-lesson" data-task-id="${task.participant_task_id}">Начать урок</button>`;
+  }
+  if (task.canOpenReport && task.status === "in_progress") {
+    return `<button class="primary-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Сдать отчёт</button>`;
+  }
+  if (task.canCompleteDirectly) {
+    return `<button class="${baseClass}" type="button" data-action="complete-task" data-task-id="${task.participant_task_id}">Отметить выполненным</button>`;
+  }
+  return "";
+}
+
+function renderJourneyLessonRow(task) {
+  return `
+    <div class="journey-lesson">
+      <div class="task-head">
+        <div>
+          <strong>${escapeHtml(task.title)}</strong>
+          <div class="subtle">${escapeHtml(task.availabilityLabel)} • ${escapeHtml(task.points)} XP • ${escapeHtml(task.estimated_minutes)} мин</div>
+        </div>
+        <span class="badge ${escapeHtml(task.journeyBadge.tone)}">${escapeHtml(task.journeyBadge.label)}</span>
+      </div>
+      <p class="subtle">${escapeHtml(task.description)}</p>
+      <div class="button-row" style="margin-top:12px">
+        <button class="inline-button" type="button" data-action="open-lesson" data-task-id="${task.participant_task_id}">Открыть урок</button>
+        ${lessonPrimaryAction(task, true)}
+      </div>
+    </div>
+  `;
+}
+
+function renderLessonFocusCard(task, eyebrow, title) {
+  if (!task) {
+    return `
+      <div class="list-box">
+        <div class="eyebrow">${escapeHtml(eyebrow)}</div>
+        <h3>${escapeHtml(title)}</h3>
+        <p class="subtle">Как только в потоке появится урок в работе, здесь будет показан следующий шаг участника.</p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="list-box">
+      <div class="eyebrow">${escapeHtml(eyebrow)}</div>
+      <div class="task-head">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          <strong>${escapeHtml(task.title)}</strong>
+        </div>
+        <span class="badge ${escapeHtml(task.journeyBadge.tone)}">${escapeHtml(task.journeyBadge.label)}</span>
+      </div>
+      <p class="subtle">${escapeHtml(task.description)}</p>
+      <div class="task-meta">
+        <span>${escapeHtml(task.module_week_label)} / ${escapeHtml(task.module_title)}</span>
+        <span>${escapeHtml(formatDate(task.scheduled_for))}</span>
+        <span>${escapeHtml(task.points)} XP</span>
+      </div>
+      <div class="progress-track" style="margin-top:12px">
+        <div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(task.participant_progress)))}%"></div>
+      </div>
+      <div class="button-row" style="margin-top:12px">
+        <button class="inline-button" type="button" data-action="open-lesson" data-task-id="${task.participant_task_id}">Открыть урок</button>
+        ${lessonPrimaryAction(task)}
+      </div>
+    </div>
   `;
 }
 
@@ -662,31 +754,79 @@ function renderOverview() {
 }
 
 function renderTasksView() {
-  const { participantBoard, notifications } = state.app;
+  const { participantBoard, notifications, participantJourney } = state.app;
   return `
     ${renderHero()}
     <section class="split-grid">
       <div class="panel">
         <div class="table-toolbar">
           <div>
-            <div class="eyebrow">Мои задания</div>
-            <h3>Неделя, где можно вернуться без чувства провала</h3>
+            <div class="eyebrow">Программа участника</div>
+            <h3>Модули и уроки вместо плоского списка карточек</h3>
           </div>
           <div class="chip-row">
-            <span class="chip" style="color:#fff">${escapeHtml(participantBoard.missedCount)} пропущено</span>
-            <span class="chip" style="color:#fff">${escapeHtml(participantBoard.softReturnCount)} мягких возвратов</span>
+            <span class="chip" style="color:#fff">${escapeHtml(participantJourney.moduleCount)} модулей</span>
+            <span class="chip" style="color:#fff">${escapeHtml(participantJourney.lessonCount)} уроков</span>
           </div>
         </div>
-        <div class="task-grid" style="margin-top:18px">
-          ${participantBoard.tasks.map(renderTaskCard).join("")}
+        <div class="list-stack" style="margin-top:18px">
+          ${participantJourney.modules
+            .map(
+              (module) => `
+                <article class="journey-module">
+                  <div class="task-head">
+                    <div>
+                      <div class="eyebrow">${escapeHtml(module.weekLabel)}</div>
+                      <h3>${escapeHtml(module.title)}</h3>
+                    </div>
+                    <span class="badge ${escapeHtml(module.badge.tone)}">${escapeHtml(module.badge.label)}</span>
+                  </div>
+                  <p class="subtle">${escapeHtml(module.description)}</p>
+                  <div class="task-meta">
+                    <span>${escapeHtml(module.completedLessons)} / ${escapeHtml(module.totalLessons)} уроков закрыто</span>
+                    <span>${escapeHtml(module.progressPercent)}%</span>
+                  </div>
+                  <div class="progress-track" style="margin-top:12px">
+                    <div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(module.progressPercent)))}%"></div>
+                  </div>
+                  <div class="journey-lesson-stack">
+                    ${module.lessons.map(renderJourneyLessonRow).join("")}
+                  </div>
+                </article>
+              `
+            )
+            .join("")}
         </div>
       </div>
       <div class="panel">
-        <div class="eyebrow">Nudges</div>
-        <h3>Напоминания, привязанные к контексту</h3>
-        <div class="notification-stack" style="margin-top:18px">
-          ${notifications.map(renderNotificationCard).join("")}
+        <div class="eyebrow">Lesson flow</div>
+        <h3>Что участник открывает следующим шагом</h3>
+        <div class="list-stack" style="margin-top:18px">
+          ${renderLessonFocusCard(participantJourney.focusLesson, "Сейчас в работе", "Фокусный урок")}
+          ${renderLessonFocusCard(participantJourney.nextLesson, "Следом по потоку", "Следующий урок")}
+          <div class="list-box">
+            <div class="eyebrow">Nudges</div>
+            <h3>Напоминания, привязанные к контексту</h3>
+            <div class="notification-stack" style="margin-top:18px">
+              ${notifications.map(renderNotificationCard).join("")}
+            </div>
+          </div>
         </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Fallback-вид</div>
+          <h3>Все задания в плоском списке для контроля прогресса</h3>
+        </div>
+        <div class="chip-row">
+          <span class="chip">${escapeHtml(participantBoard.missedCount)} пропущено</span>
+          <span class="chip">${escapeHtml(participantBoard.softReturnCount)} мягких возвратов</span>
+        </div>
+      </div>
+      <div class="task-grid" style="margin-top:18px">
+        ${participantBoard.tasks.map(renderTaskCard).join("")}
       </div>
     </section>
   `;
@@ -1586,6 +1726,55 @@ function renderModal() {
     `;
   }
 
+  if (state.modal.type === "lesson") {
+    const task = state.app.participantBoard.tasks.find((item) => item.participant_task_id === state.modal.taskId);
+    const journeyTask =
+      state.app.participantJourney?.modules
+        ?.flatMap((module) => module.lessons || [])
+        ?.find((item) => item.participant_task_id === state.modal.taskId) || task;
+    modalCard.innerHTML = `
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Урок / lesson view</div>
+          <h3>${escapeHtml(task.title)}</h3>
+        </div>
+        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
+      </div>
+      <p class="subtle">${escapeHtml(task.module_week_label || "")} / ${escapeHtml(task.module_title || "")}</p>
+      <p>${escapeHtml(task.description)}</p>
+      <div class="task-meta" style="margin-top:12px">
+        <span>${escapeHtml(formatDate(task.scheduled_for))}</span>
+        <span>${escapeHtml(task.points)} XP</span>
+        <span>${escapeHtml(task.estimated_minutes)} мин</span>
+        <span>${escapeHtml(task.submission_mode)}</span>
+      </div>
+      <div class="progress-track" style="margin-top:18px">
+        <div class="progress-fill" style="width:${Math.max(0, Math.min(100, Number(task.participant_progress)))}%"></div>
+      </div>
+      <div class="button-row" style="margin-top:18px">
+        ${lessonPrimaryAction(journeyTask)}
+        ${journeyTask?.isUpcoming ? "" : `<button class="inline-button" type="button" data-action="open-report" data-task-id="${task.participant_task_id}">Открыть отчёт</button>`}
+      </div>
+      ${journeyTask?.isUpcoming ? `<div class="report-box" style="margin-top:18px"><strong>Preview</strong><p class="subtle">Этот урок уже виден в структуре программы, но откроется ближе к дате ${escapeHtml(formatDate(task.scheduled_for))}.</p></div>` : ""}
+      ${task.status === "missed" ? `<div class="report-box" style="margin-top:18px"><strong>Мягкий возврат</strong><p class="subtle">${escapeHtml(task.soft_return_copy)}</p></div>` : ""}
+      ${
+        task.report_content
+          ? `
+            <div class="report-box" style="margin-top:18px">
+              <div class="eyebrow">Последний отчёт</div>
+              <strong>${escapeHtml(task.report_type || "report")}</strong>
+              <p class="subtle">${escapeHtml(task.report_content)}</p>
+              <div class="task-meta">
+                <span>${escapeHtml(task.attachment_name || "Без вложения")}</span>
+                <span>${escapeHtml(task.report_status || "accepted")}</span>
+              </div>
+            </div>
+          `
+          : ""
+      }
+    `;
+  }
+
   if (state.modal.type === "login") {
     const recommended = state.me?.demoCredentials?.[0] || {
       email: "demo@goalmate.local",
@@ -1874,8 +2063,19 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "start-lesson") {
+    await performRequest(`/api/participant-tasks/${id}/start`);
+    showToast("Урок переведён в работу");
+    return;
+  }
+
   if (action === "open-report") {
     openReportModal(id);
+    return;
+  }
+
+  if (action === "open-lesson") {
+    openLessonModal(id);
     return;
   }
 

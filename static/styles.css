@@ -921,7 +921,28 @@ textarea {
     min-height: 200px;
   }
 
-  .metric-bar-track {
+.metric-bar-track {
     min-height: 160px;
   }
+}
+
+.journey-module {
+  background: rgba(248, 250, 252, 0.82);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 24px;
+  padding: 22px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
+}
+
+.journey-lesson-stack {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.journey-lesson {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.92);
 }

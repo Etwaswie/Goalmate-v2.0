@@ -2995,6 +2995,96 @@ def get_modules_with_tasks(conn: sqlite3.Connection, program_id: int) -> list[di
     return modules
 
 
+def lesson_journey_badge(task: dict) -> dict[str, str]:
+    scheduled_for = str(task.get("scheduled_for") or "")
+    if task.get("status") == "planned" and scheduled_for and scheduled_for > str(date.today()):
+        return {"label": "Скоро откроется", "tone": "neutral"}
+    return progress_badge(str(task.get("status", "planned")))
+
+
+def build_participant_journey(modules: list[dict], participant_tasks: list[dict]) -> dict:
+    task_by_id = {int(task["task_id"]): task for task in participant_tasks}
+    journey_modules: list[dict] = []
+    ordered_lessons: list[dict] = []
+
+    for module in modules:
+        module_lessons: list[dict] = []
+        for task in module.get("tasks", []):
+            participant_task = task_by_id.get(int(task["id"]))
+            if participant_task is None:
+                continue
+            lesson = dict(participant_task)
+            lesson_badge = lesson_journey_badge(lesson)
+            lesson["journeyBadge"] = lesson_badge
+            lesson["isUpcoming"] = lesson_badge["label"] == "Скоро откроется"
+            lesson["canStart"] = lesson["status"] == "planned" and not lesson["isUpcoming"]
+            lesson["canSoftReturn"] = lesson["status"] == "missed"
+            lesson["canCompleteDirectly"] = lesson["status"] in {"planned", "in_progress"} and not int(lesson["report_required"])
+            lesson["canOpenReport"] = bool(int(lesson["report_required"])) or bool(lesson.get("report_content"))
+            lesson["availabilityLabel"] = (
+                f"Откроется {lesson['scheduled_for']}"
+                if lesson["isUpcoming"]
+                else lesson_badge["label"]
+            )
+            module_lessons.append(lesson)
+            ordered_lessons.append(lesson)
+
+        completed_count = sum(1 for lesson in module_lessons if lesson["status"] == "completed")
+        upcoming_count = sum(1 for lesson in module_lessons if lesson["isUpcoming"])
+        active_count = sum(1 for lesson in module_lessons if lesson["status"] == "in_progress")
+        missed_count = sum(1 for lesson in module_lessons if lesson["status"] == "missed")
+
+        if module_lessons and completed_count == len(module_lessons):
+            module_badge = {"label": "Завершён", "tone": "success"}
+        elif active_count:
+            module_badge = {"label": "В работе", "tone": "info"}
+        elif missed_count:
+            module_badge = {"label": "Нужен возврат", "tone": "warning"}
+        elif module_lessons and upcoming_count == len(module_lessons):
+            module_badge = {"label": "Скоро откроется", "tone": "neutral"}
+        else:
+            module_badge = {"label": "Открыт", "tone": "info"}
+
+        journey_modules.append(
+            {
+                "id": module["id"],
+                "title": module["title"],
+                "description": module["description"],
+                "weekLabel": module["week_label"],
+                "progressPercent": round((completed_count / max(len(module_lessons), 1)) * 100, 1) if module_lessons else 0,
+                "completedLessons": completed_count,
+                "totalLessons": len(module_lessons),
+                "badge": module_badge,
+                "lessons": module_lessons,
+            }
+        )
+
+    focus_lesson = next((lesson for lesson in ordered_lessons if lesson["status"] == "in_progress"), None)
+    if focus_lesson is None:
+        focus_lesson = next((lesson for lesson in ordered_lessons if lesson["status"] == "missed"), None)
+    if focus_lesson is None:
+        focus_lesson = next((lesson for lesson in ordered_lessons if lesson["status"] == "planned" and not lesson["isUpcoming"]), None)
+    if focus_lesson is None and ordered_lessons:
+        focus_lesson = ordered_lessons[0]
+
+    next_lesson = next(
+        (
+            lesson
+            for lesson in ordered_lessons
+            if lesson["status"] != "completed" and lesson != focus_lesson
+        ),
+        None,
+    )
+
+    return {
+        "modules": journey_modules,
+        "focusLesson": focus_lesson,
+        "nextLesson": next_lesson,
+        "moduleCount": len(journey_modules),
+        "lessonCount": len(ordered_lessons),
+    }
+
+
 def get_bootstrap_state(context: RequestContext | None = None) -> dict:
     context = context or current_request_context()
 
@@ -3045,8 +3135,12 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
                 t.points,
                 t.estimated_minutes,
                 t.scheduled_for,
+                t.position AS task_position,
                 t.soft_return_copy,
+                m.id AS module_id,
                 m.title AS module_title,
+                m.week_label AS module_week_label,
+                m.position AS module_position,
                 r.report_type,
                 r.content AS report_content,
                 r.attachment_name,
@@ -3244,6 +3338,7 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
         today_focus = sum(1 for task in participant_tasks if task["status"] in {"completed", "in_progress"})
         total_focus = len(participant_tasks)
         builder_modules = get_modules_with_tasks(conn, context.program_id)
+        participant_journey = build_participant_journey(builder_modules, participant_tasks)
         invitation_codes = get_program_invitation_codes(conn, context.program_id)
         launch_center = build_launch_center(conn, context, organizer, program, builder_modules, invitation_codes)
 
@@ -3281,6 +3376,7 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
                 "softReturnCount": enrollment["soft_return_count"],
                 "unreadNotifications": unread_notifications,
             },
+            "participantJourney": participant_journey,
             "leaderboard": {
                 "topThree": top_three,
                 "rows": leaderboard_rows,
@@ -3786,6 +3882,62 @@ def soft_return_task(participant_task_id: int, context: RequestContext | None = 
             f"Задача '{record['title']}' снова в работе. Прогресс не обнулился.",
             "soft_return",
             "soft_return_used",
+            "Продолжить",
+        )
+        conn.commit()
+
+    return get_bootstrap_state(context)
+
+
+def start_task(participant_task_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "participant")
+
+    with connect_db() as conn:
+        record = conn.execute(
+            """
+            SELECT
+                pt.id,
+                pt.status,
+                pt.progress_percent,
+                t.title,
+                t.scheduled_for
+            FROM participant_tasks pt
+            JOIN tasks t ON t.id = pt.task_id
+            WHERE pt.id = ? AND pt.participant_id = ?
+            """,
+            (participant_task_id, context.participant_id),
+        ).fetchone()
+        if record is None:
+            raise ValueError("Урок не найден")
+        if record["status"] == "completed":
+            raise ValueError("Этот урок уже завершён")
+        if record["status"] == "missed":
+            raise ValueError("Для пропущенного урока используй мягкий возврат")
+        if str(record["scheduled_for"] or "") > str(date.today()):
+            raise ValueError("Этот урок ещё не открыт по расписанию")
+
+        conn.execute(
+            """
+            UPDATE participant_tasks
+            SET status = 'in_progress',
+                progress_percent = CASE
+                    WHEN progress_percent < 15 THEN 15
+                    ELSE progress_percent
+                END,
+                last_interaction_at = ?
+            WHERE id = ?
+            """,
+            (now_iso(), participant_task_id),
+        )
+        touch_participant(conn, context.participant_id)
+        add_notification(
+            conn,
+            context,
+            "Урок открыт",
+            f"Шаг '{record['title']}' переведён в active work. Можно продолжать без лишнего шума.",
+            "lesson",
+            "lesson_started",
             "Продолжить",
         )
         conn.commit()
@@ -4536,6 +4688,10 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/participant-tasks/") and path.endswith("/complete"):
                 participant_task_id = int(path.split("/")[3])
                 self.send_json({"ok": True, "data": complete_task(participant_task_id, context=context)})
+                return
+            if path.startswith("/api/participant-tasks/") and path.endswith("/start"):
+                participant_task_id = int(path.split("/")[3])
+                self.send_json({"ok": True, "data": start_task(participant_task_id, context=context)})
                 return
             if path.startswith("/api/participant-tasks/") and path.endswith("/soft-return"):
                 participant_task_id = int(path.split("/")[3])
