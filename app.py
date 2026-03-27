@@ -1680,6 +1680,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
     )
 
     daily_metrics = []
+    daily_metric_id = 1
     for offset, active, reports_count, missed, completion in [
         (6, 68, 34, 11, 58.0),
         (5, 72, 39, 9, 61.0),
@@ -1689,13 +1690,15 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         (1, 81, 48, 6, 72.0),
         (0, 84, 51, 5, 75.0),
     ]:
-        daily_metrics.append((None, 1, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
+        daily_metrics.append((daily_metric_id, 1, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
+        daily_metric_id += 1
     for offset, active, reports_count, missed, completion in [
         (70, 18, 8, 3, 42.0),
         (69, 19, 9, 2, 47.0),
         (68, 21, 10, 2, 50.0),
     ]:
-        daily_metrics.append((None, 2, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
+        daily_metrics.append((daily_metric_id, 2, str(today - timedelta(days=offset)), active, reports_count, missed, completion))
+        daily_metric_id += 1
     conn.executemany(
         """
         INSERT INTO daily_metrics (
