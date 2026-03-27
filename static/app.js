@@ -324,7 +324,7 @@ function renderAuthPanel() {
         <button class="inline-button" type="button" data-action="logout">Выйти</button>
       </div>
     `
-    : `<button class="inline-button" type="button" data-action="open-login">Demo login</button>`;
+    : `<button class="inline-button" type="button" data-action="open-login">Войти / регистрация</button>`;
   const currentProgramId = state.me.memberships?.currentScope?.programId;
   const scopeSwitcher =
     state.me.authenticated && availableScopes().length > 1
@@ -1351,11 +1351,11 @@ function renderModal() {
       <div class="table-toolbar">
         <div>
           <div class="eyebrow">Auth foundation</div>
-          <h3>Создать demo-сессию</h3>
+          <h3>Вход и регистрация</h3>
         </div>
         <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
       </div>
-      <p class="subtle">Реальная auth уже заведена в локальной базе, но development fallback всё ещё активен. Ниже можно создать настоящую cookie-сессию и проверить следующий слой архитектуры.</p>
+      <p class="subtle">В staging уже можно не только входить под demo-аккаунтами, но и регистрировать нового участника сразу по invite code. Это не полный onboarding организатора, а первый рабочий вход для реального пользователя.</p>
       <form id="login-form" style="margin-top:18px">
         <div class="form-grid">
           <label>
@@ -1368,6 +1368,33 @@ function renderModal() {
           </label>
         </div>
         <button class="primary-button" type="submit">Войти</button>
+      </form>
+      <form id="register-form" style="margin-top:18px">
+        <div class="table-toolbar">
+          <div>
+            <div class="eyebrow">Новый участник</div>
+            <h3>Регистрация по коду</h3>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label>
+            Имя
+            <input name="fullName" placeholder="Например: Алина Смирнова" required />
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" placeholder="you@example.com" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" placeholder="Минимум 8 символов" minlength="8" required />
+          </label>
+          <label>
+            Код приглашения
+            <input name="code" placeholder="Например: WINTER26" maxlength="16" required />
+          </label>
+        </div>
+        <button class="secondary-button" type="submit">Зарегистрироваться и войти</button>
       </form>
       <div class="list-stack" style="margin-top:18px">
         ${credentialRows}
@@ -1512,6 +1539,15 @@ document.addEventListener("submit", async (event) => {
     const ok = await performAuthRequest("/api/auth/login", payload);
     if (ok) {
       showToast("Demo-сессия создана");
+    }
+    return;
+  }
+
+  if (form.id === "register-form") {
+    const response = await performAuthRequest("/api/auth/register", payload);
+    if (response) {
+      const joinedProgramName = response.joinedProgram?.name || "новый поток";
+      showToast(`Аккаунт создан, вход выполнен: ${joinedProgramName}`);
     }
     return;
   }

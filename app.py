@@ -1202,14 +1202,240 @@ def get_me_state(context: RequestContext | None = None) -> dict:
     return me_state
 
 
+def session_client_meta(handler: BaseHTTPRequestHandler | None = None) -> tuple[str, str]:
+    user_agent = handler.headers.get("User-Agent", "") if handler is not None else ""
+    ip_address = handler.client_address[0] if handler is not None and handler.client_address else ""
+    return user_agent, ip_address
+
+
+def create_authenticated_session(
+    conn: sqlite3.Connection,
+    user_id: int,
+    scope: dict,
+    handler: BaseHTTPRequestHandler | None = None,
+) -> str:
+    user_agent, ip_address = session_client_meta(handler)
+    user_context = ensure_legacy_user_context(conn, user_id, scope)
+
+    token = generate_session_token()
+    token_hash = hash_session_token(token, CONFIG.session_secret)
+    expires_at = session_expiry_iso()
+    session_cursor = conn.execute(
+        """
+        INSERT INTO sessions (
+            user_id, user_context_id, token_hash, created_at, expires_at, last_seen_at, user_agent, ip_address
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            user_context["id"],
+            token_hash,
+            now_iso(),
+            expires_at,
+            now_iso(),
+            user_agent,
+            ip_address,
+        ),
+    )
+    upsert_session_scope(
+        conn,
+        session_cursor.lastrowid,
+        scope["organizer_id"],
+        scope["program_id"],
+        scope["participant_id"],
+    )
+    conn.execute(
+        "UPDATE users SET last_login_at = ? WHERE id = ?",
+        (now_iso(), user_id),
+    )
+    return token
+
+
+def attach_user_to_program_via_code(
+    conn: sqlite3.Connection,
+    user_id: int,
+    code: str,
+    context: RequestContext | None = None,
+) -> dict:
+    invitation = conn.execute(
+        """
+        SELECT
+            ic.*,
+            p.organizer_id,
+            p.name AS program_name,
+            p.status AS program_status
+        FROM invitation_codes ic
+        JOIN programs p ON p.id = ic.program_id
+        WHERE upper(ic.code) = ? AND ic.is_active = 1
+        LIMIT 1
+        """,
+        (code,),
+    ).fetchone()
+    if invitation is None:
+        raise ValueError("Код приглашения не найден")
+    if invitation["expires_at"] and invitation["expires_at"] <= now_iso():
+        raise ValueError("Срок действия кода уже истёк")
+    if int(invitation["used_count"]) >= int(invitation["max_uses"]):
+        raise ValueError("Лимит использований этого кода уже исчерпан")
+
+    participant_id = resolve_participant_id_for_user(conn, user_id, context)
+    existing_membership = conn.execute(
+        """
+        SELECT *
+        FROM program_memberships
+        WHERE user_id = ? AND program_id = ? AND role = 'participant'
+        LIMIT 1
+        """,
+        (user_id, invitation["program_id"]),
+    ).fetchone()
+    already_joined = existing_membership is not None
+
+    if existing_membership is None:
+        existing_participant_access = conn.execute(
+            """
+            SELECT id
+            FROM program_memberships
+            WHERE user_id = ? AND role = 'participant'
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO program_memberships (
+                user_id, program_id, participant_id, role, is_default, created_at
+            ) VALUES (?, ?, ?, 'participant', ?, ?)
+            """,
+            (user_id, invitation["program_id"], participant_id, 0 if existing_participant_access else 1, now_iso()),
+        )
+    elif existing_membership["participant_id"] is None:
+        conn.execute(
+            """
+            UPDATE program_memberships
+            SET participant_id = ?
+            WHERE id = ?
+            """,
+            (participant_id, existing_membership["id"]),
+        )
+
+    total_tasks = ensure_program_participant_tasks(conn, invitation["program_id"], participant_id)
+    enrollment = conn.execute(
+        """
+        SELECT *
+        FROM enrollments
+        WHERE program_id = ? AND participant_id = ?
+        LIMIT 1
+        """,
+        (invitation["program_id"], participant_id),
+    ).fetchone()
+    if enrollment is None:
+        conn.execute(
+            """
+            INSERT INTO enrollments (
+                program_id, participant_id, role, progress_percent, xp, completed_tasks,
+                total_tasks, soft_return_count, at_risk, joined_at
+            ) VALUES (?, ?, 'participant', 0, 0, 0, ?, 0, 0, ?)
+            """,
+            (invitation["program_id"], participant_id, total_tasks, now_iso()),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE enrollments
+            SET total_tasks = CASE WHEN total_tasks < ? THEN ? ELSE total_tasks END
+            WHERE id = ?
+            """,
+            (total_tasks, total_tasks, enrollment["id"]),
+        )
+
+    ensure_program_team_membership(conn, invitation["program_id"], participant_id)
+
+    if not already_joined:
+        conn.execute(
+            """
+            UPDATE invitation_codes
+            SET used_count = used_count + 1
+            WHERE id = ?
+            """,
+            (invitation["id"],),
+        )
+
+    memberships = list_user_memberships(conn, user_id)
+    available_roles = available_roles_from_memberships(
+        memberships,
+        invitation["organizer_id"],
+        invitation["program_id"],
+        participant_id,
+    )
+    scope = {
+        "organizer_id": int(invitation["organizer_id"]),
+        "program_id": int(invitation["program_id"]),
+        "participant_id": int(participant_id),
+        "available_roles": available_roles,
+        "primary_role": primary_role_from_available_roles(available_roles),
+    }
+
+    return {
+        "invitation": invitation,
+        "participant_id": int(participant_id),
+        "already_joined": already_joined,
+        "scope": scope,
+    }
+
+
+def register_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> tuple[dict, str]:
+    full_name = str(payload.get("fullName", payload.get("full_name", ""))).strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
+    code = str(payload.get("code", "")).strip().upper()
+
+    if not full_name or not email or not password or not code:
+        raise ValueError("Нужны имя, email, пароль и код приглашения")
+    if len(password) < 8:
+        raise ValueError("Пароль должен быть не короче 8 символов")
+
+    with connect_db() as conn:
+        existing_user = conn.execute(
+            "SELECT id FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        if existing_user is not None:
+            raise ValueError("Пользователь с таким email уже существует")
+
+        user_cursor = conn.execute(
+            """
+            INSERT INTO users (
+                email, password_hash, full_name, user_type, is_active, created_at, last_login_at
+            ) VALUES (?, ?, ?, 'participant', 1, ?, NULL)
+            """,
+            (email, hash_password(password), full_name, now_iso()),
+        )
+        user_id = int(user_cursor.lastrowid)
+        join_state = attach_user_to_program_via_code(conn, user_id, code)
+        token = create_authenticated_session(conn, user_id, join_state["scope"], handler)
+        conn.commit()
+
+    resolved_context = resolve_session_context_from_token(token)
+    if resolved_context is None:
+        raise ValueError("Не удалось создать сессию для нового пользователя")
+    return {
+        "me": get_me_state(resolved_context),
+        "bootstrap": get_bootstrap_state(resolved_context),
+        "joinedProgram": {
+            "id": join_state["invitation"]["program_id"],
+            "name": join_state["invitation"]["program_name"],
+            "status": join_state["invitation"]["program_status"],
+        },
+        "code": code,
+        "registered": True,
+    }, build_session_cookie(token)
+
+
 def login_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> tuple[dict, str]:
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", "")).strip()
     if not email or not password:
         raise ValueError("Нужны email и пароль")
-
-    user_agent = handler.headers.get("User-Agent", "") if handler is not None else ""
-    ip_address = handler.client_address[0] if handler is not None and handler.client_address else ""
 
     with connect_db() as conn:
         user = conn.execute(
@@ -1223,45 +1449,12 @@ def login_user(payload: dict, handler: BaseHTTPRequestHandler | None = None) -> 
         scope = default_scope_from_memberships(conn, user["id"], memberships)
         if scope is None:
             raise ValueError("Для этого пользователя не найден доступ к GoalMate")
-        user_context = ensure_legacy_user_context(conn, user["id"], scope)
-
-        token = generate_session_token()
-        token_hash = hash_session_token(token, CONFIG.session_secret)
-        expires_at = session_expiry_iso()
-        session_cursor = conn.execute(
-            """
-            INSERT INTO sessions (
-                user_id, user_context_id, token_hash, created_at, expires_at, last_seen_at, user_agent, ip_address
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user["id"],
-                user_context["id"],
-                token_hash,
-                now_iso(),
-                expires_at,
-                now_iso(),
-                user_agent,
-                ip_address,
-            ),
-        )
-        upsert_session_scope(
-            conn,
-            session_cursor.lastrowid,
-            scope["organizer_id"],
-            scope["program_id"],
-            scope["participant_id"],
-        )
-        conn.execute(
-            "UPDATE users SET last_login_at = ? WHERE id = ?",
-            (now_iso(), user["id"]),
-        )
+        token = create_authenticated_session(conn, user["id"], scope, handler)
         conn.commit()
 
-    if handler is not None:
-        context = resolve_session_context_from_token(token)
-    else:
-        context = current_request_context()
+    context = resolve_session_context_from_token(token)
+    if context is None:
+        raise ValueError("Не удалось восстановить сессию после входа")
 
     return {"me": get_me_state(context), "bootstrap": get_bootstrap_state(context)}, build_session_cookie(token)
 
@@ -1448,115 +1641,21 @@ def join_program_by_invitation_code(payload: dict, context: RequestContext | Non
         raise ValueError("Нужен код приглашения")
 
     with connect_db() as conn:
-        invitation = conn.execute(
-            """
-            SELECT
-                ic.*,
-                p.organizer_id,
-                p.name AS program_name,
-                p.status AS program_status
-            FROM invitation_codes ic
-            JOIN programs p ON p.id = ic.program_id
-            WHERE upper(ic.code) = ? AND ic.is_active = 1
-            LIMIT 1
-            """,
-            (code,),
-        ).fetchone()
-        if invitation is None:
-            raise ValueError("Код приглашения не найден")
-        if invitation["expires_at"] and invitation["expires_at"] <= now_iso():
-            raise ValueError("Срок действия кода уже истёк")
-        if int(invitation["used_count"]) >= int(invitation["max_uses"]):
-            raise ValueError("Лимит использований этого кода уже исчерпан")
-
-        participant_id = resolve_participant_id_for_user(conn, context.user_id, context)
-        existing_membership = conn.execute(
-            """
-            SELECT *
-            FROM program_memberships
-            WHERE user_id = ? AND program_id = ? AND role = 'participant'
-            LIMIT 1
-            """,
-            (context.user_id, invitation["program_id"]),
-        ).fetchone()
-        already_joined = existing_membership is not None
-
-        if existing_membership is None:
-            conn.execute(
-                """
-                INSERT INTO program_memberships (
-                    user_id, program_id, participant_id, role, is_default, created_at
-                ) VALUES (?, ?, ?, 'participant', 0, ?)
-                """,
-                (context.user_id, invitation["program_id"], participant_id, now_iso()),
-            )
-        elif existing_membership["participant_id"] is None:
-            conn.execute(
-                """
-                UPDATE program_memberships
-                SET participant_id = ?
-                WHERE id = ?
-                """,
-                (participant_id, existing_membership["id"]),
-            )
-
-        total_tasks = ensure_program_participant_tasks(conn, invitation["program_id"], participant_id)
-        enrollment = conn.execute(
-            """
-            SELECT *
-            FROM enrollments
-            WHERE program_id = ? AND participant_id = ?
-            LIMIT 1
-            """,
-            (invitation["program_id"], participant_id),
-        ).fetchone()
-        if enrollment is None:
-            conn.execute(
-                """
-                INSERT INTO enrollments (
-                    program_id, participant_id, role, progress_percent, xp, completed_tasks,
-                    total_tasks, soft_return_count, at_risk, joined_at
-                ) VALUES (?, ?, 'participant', 0, 0, 0, ?, 0, 0, ?)
-                """,
-                (invitation["program_id"], participant_id, total_tasks, now_iso()),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE enrollments
-                SET total_tasks = CASE WHEN total_tasks < ? THEN ? ELSE total_tasks END
-                WHERE id = ?
-                """,
-                (total_tasks, total_tasks, enrollment["id"]),
-            )
-
-        ensure_program_team_membership(conn, invitation["program_id"], participant_id)
-
-        if not already_joined:
-            conn.execute(
-                """
-                UPDATE invitation_codes
-                SET used_count = used_count + 1
-                WHERE id = ?
-                """,
-                (invitation["id"],),
-            )
+        join_state = attach_user_to_program_via_code(conn, context.user_id, code, context)
+        invitation = join_state["invitation"]
+        participant_id = join_state["participant_id"]
+        already_joined = join_state["already_joined"]
 
         legacy_context = ensure_legacy_user_context(
             conn,
             context.user_id,
-            {
-                "organizer_id": invitation["organizer_id"],
-                "program_id": invitation["program_id"],
-                "participant_id": participant_id,
-                "primary_role": "participant",
-            },
+            join_state["scope"],
         )
         upsert_session_scope(
             conn,
             context.session_id,
-            invitation["organizer_id"],
-            invitation["program_id"],
+            join_state["scope"]["organizer_id"],
+            join_state["scope"]["program_id"],
             participant_id,
         )
         conn.execute(
@@ -3141,6 +3240,10 @@ class GoalMateHandler(BaseHTTPRequestHandler):
         try:
             context = self.request_context()
             payload = self.read_json_body()
+            if path == "/api/auth/register":
+                auth_payload, session_cookie = register_user(payload, self)
+                self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
             if path == "/api/auth/login":
                 auth_payload, session_cookie = login_user(payload, self)
                 self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
