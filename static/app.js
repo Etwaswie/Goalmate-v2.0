@@ -187,10 +187,10 @@ async function performAuthRequest(path, payload = null) {
     state.me = response.me;
     syncRoleFromAccess();
     closeModal();
-    return true;
+    return response;
   } catch (error) {
     showToast(error.message, true);
-    return false;
+    return null;
   } finally {
     state.busy = false;
     render();
@@ -249,6 +249,11 @@ function openReportModal(taskId) {
 
 function openLoginModal() {
   state.modal = { type: "login" };
+  renderModal();
+}
+
+function openJoinCodeModal() {
+  state.modal = { type: "join-code" };
   renderModal();
 }
 
@@ -312,8 +317,13 @@ function renderAuthPanel() {
   const badge = state.me.authenticated
     ? `<span class="badge success">session</span>`
     : `<span class="badge info">fallback</span>`;
-  const action = state.me.authenticated
-    ? `<button class="inline-button" type="button" data-action="logout">Выйти</button>`
+  const actions = state.me.authenticated
+    ? `
+      <div class="auth-panel-actions">
+        <button class="inline-button" type="button" data-action="open-join-code">Ввести код</button>
+        <button class="inline-button" type="button" data-action="logout">Выйти</button>
+      </div>
+    `
     : `<button class="inline-button" type="button" data-action="open-login">Demo login</button>`;
   const currentProgramId = state.me.memberships?.currentScope?.programId;
   const scopeSwitcher =
@@ -343,7 +353,7 @@ function renderAuthPanel() {
       <span>${escapeHtml(subtitle)}</span>
     </div>
     ${scopeSwitcher}
-    ${action}
+    ${actions}
   `;
 }
 
@@ -932,7 +942,35 @@ function renderBuilderView() {
       </div>
 
       <div class="panel">
-        <div class="eyebrow">Библиотека шаблонов</div>
+        <div class="table-toolbar">
+          <div>
+            <div class="eyebrow">Invite flow</div>
+            <h3>Коды приглашения в поток</h3>
+          </div>
+          <button class="secondary-button" type="button" data-action="generate-invite-code">Сгенерировать код</button>
+        </div>
+        <div class="list-stack" style="margin-top:18px">
+          ${builder.invitationCodes?.length
+            ? builder.invitationCodes
+                .map(
+                  (item) => `
+                    <div class="list-box">
+                      <div class="task-head">
+                        <div>
+                          <strong>${escapeHtml(item.code)}</strong>
+                          <div class="subtle">Осталось ${escapeHtml(item.remaining_uses)} / ${escapeHtml(item.max_uses)} использований</div>
+                        </div>
+                        <span class="badge ${item.is_active ? "success" : "neutral"}">${item.is_active ? "active" : "inactive"}</span>
+                      </div>
+                      <p class="subtle">Создан ${escapeHtml(formatDateTime(item.created_at))}${item.expires_at ? ` • истекает ${escapeHtml(formatDateTime(item.expires_at))}` : ""}</p>
+                    </div>
+                  `
+                )
+                .join("")
+            : '<div class="empty-card">Для этого потока ещё не создано ни одного invite code.</div>'}
+        </div>
+
+        <div class="eyebrow" style="margin-top:24px">Библиотека шаблонов</div>
         <h3>Переиспользование прошлых запусков</h3>
         <div class="list-stack" style="margin-top:18px">
           ${builder.reusablePrograms
@@ -1337,6 +1375,26 @@ function renderModal() {
     `;
   }
 
+  if (state.modal.type === "join-code") {
+    modalCard.innerHTML = `
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Invite flow</div>
+          <h3>Присоединиться по коду</h3>
+        </div>
+        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
+      </div>
+      <p class="subtle">Эта механика перенесена из ветки v2: организатор выдаёт код, а участник или mixed-аккаунт добавляет себе новый поток без ручной настройки в базе.</p>
+      <form id="join-code-form" style="margin-top:18px">
+        <label>
+          Код приглашения
+          <input name="code" placeholder="Например: SPRING26" maxlength="16" required />
+        </label>
+        <button class="primary-button" type="submit">Войти в поток</button>
+      </form>
+    `;
+  }
+
   modal.classList.remove("hidden");
 }
 
@@ -1403,6 +1461,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "open-join-code") {
+    openJoinCodeModal();
+    return;
+  }
+
   if (action === "logout") {
     const ok = await performAuthRequest("/api/auth/logout");
     if (ok) {
@@ -1420,6 +1483,13 @@ document.addEventListener("click", async (event) => {
   if (action === "duplicate-program") {
     await performRequest(`/api/programs/${id}/duplicate`);
     showToast("Программа клонирована");
+    return;
+  }
+
+  if (action === "generate-invite-code") {
+    await performRequest("/api/invitation-codes", { maxUses: 100 });
+    const latestCode = state.app?.builder?.invitationCodes?.[0]?.code;
+    showToast(latestCode ? `Новый invite code: ${latestCode}` : "Код приглашения создан");
   }
 });
 
@@ -1442,6 +1512,15 @@ document.addEventListener("submit", async (event) => {
     const ok = await performAuthRequest("/api/auth/login", payload);
     if (ok) {
       showToast("Demo-сессия создана");
+    }
+    return;
+  }
+
+  if (form.id === "join-code-form") {
+    const response = await performAuthRequest("/api/invitation-codes/join", payload);
+    if (response) {
+      const joinedProgramName = response.joinedProgram?.name || "новый поток";
+      showToast(response.alreadyJoined ? `Этот поток уже был у тебя в доступе: ${joinedProgramName}` : `Поток добавлен: ${joinedProgramName}`);
     }
     return;
   }

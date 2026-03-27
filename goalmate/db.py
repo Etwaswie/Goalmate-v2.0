@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency in early i
 IDENTITY_TABLES = (
     "organizers",
     "programs",
+    "invitation_codes",
     "users",
     "user_contexts",
     "sessions",

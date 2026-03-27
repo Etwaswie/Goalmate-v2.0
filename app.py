@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -109,6 +110,18 @@ CREATE TABLE IF NOT EXISTS programs (
     status TEXT NOT NULL,
     FOREIGN KEY (organizer_id) REFERENCES organizers(id),
     FOREIGN KEY (source_program_id) REFERENCES programs(id)
+);
+
+CREATE TABLE IF NOT EXISTS invitation_codes (
+    id INTEGER PRIMARY KEY,
+    program_id INTEGER NOT NULL,
+    code TEXT NOT NULL UNIQUE,
+    max_uses INTEGER NOT NULL DEFAULT 100,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -352,6 +365,14 @@ CREATE TABLE IF NOT EXISTS private_challenge_members (
 
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat(sep=" ")
+
+
+def generate_invitation_code() -> str:
+    return secrets.token_hex(4).upper()
+
+
+def submission_requires_report(submission_mode: str) -> int:
+    return 1 if submission_mode in {"text", "photo", "voice"} else 0
 
 
 def current_request_context(handler: BaseHTTPRequestHandler | None = None) -> RequestContext:
@@ -701,6 +722,170 @@ def scope_membership_state(
         },
         "availableScopes": available_scopes or [],
     }
+
+
+def get_program_invitation_codes(conn: sqlite3.Connection, program_id: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM invitation_codes
+        WHERE program_id = ?
+        ORDER BY id DESC
+        """,
+        (program_id,),
+    ).fetchall()
+    codes: list[dict] = []
+    for row in rows:
+        item = row_to_dict(row)
+        item["remaining_uses"] = max(int(item["max_uses"]) - int(item["used_count"]), 0)
+        codes.append(item)
+    return codes
+
+
+def resolve_participant_id_for_user(
+    conn: sqlite3.Connection,
+    user_id: int,
+    context: RequestContext | None = None,
+) -> int:
+    if (
+        context is not None
+        and context.participant_id
+        and "participant" in available_roles_for_context(context)
+    ):
+        return int(context.participant_id)
+
+    membership_row = conn.execute(
+        """
+        SELECT participant_id
+        FROM program_memberships
+        WHERE user_id = ? AND participant_id IS NOT NULL
+        ORDER BY is_default DESC, id ASC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if membership_row is not None and membership_row["participant_id"] is not None:
+        return int(membership_row["participant_id"])
+
+    user = conn.execute(
+        "SELECT full_name, email FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if user is None:
+        raise ValueError("Пользователь не найден")
+
+    participant = conn.execute(
+        "SELECT id FROM participants WHERE lower(email) = ? LIMIT 1",
+        (str(user["email"]).lower(),),
+    ).fetchone()
+    if participant is not None:
+        return int(participant["id"])
+
+    cursor = conn.execute(
+        """
+        INSERT INTO participants (
+            full_name, email, city, bio, avatar_bg, streak_days, last_active_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+        """,
+        (
+            user["full_name"],
+            user["email"],
+            "Не указан",
+            "Новый участник GoalMate.",
+            "#D4E8FF",
+            now_iso(),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def ensure_program_team_membership(
+    conn: sqlite3.Connection,
+    program_id: int,
+    participant_id: int,
+) -> None:
+    existing = conn.execute(
+        """
+        SELECT tm.id
+        FROM team_members tm
+        JOIN teams t ON t.id = tm.team_id
+        WHERE t.program_id = ? AND tm.participant_id = ?
+        LIMIT 1
+        """,
+        (program_id, participant_id),
+    ).fetchone()
+    if existing is not None:
+        return
+
+    team_row = conn.execute(
+        """
+        SELECT t.id, COUNT(tm.id) AS member_count
+        FROM teams t
+        LEFT JOIN team_members tm ON tm.team_id = t.id
+        WHERE t.program_id = ?
+        GROUP BY t.id
+        ORDER BY member_count ASC, t.id ASC
+        LIMIT 1
+        """,
+        (program_id,),
+    ).fetchone()
+    if team_row is None:
+        return
+
+    conn.execute(
+        """
+        INSERT INTO team_members (team_id, participant_id, is_captain)
+        VALUES (?, ?, 0)
+        """,
+        (team_row["id"], participant_id),
+    )
+
+
+def ensure_program_participant_tasks(
+    conn: sqlite3.Connection,
+    program_id: int,
+    participant_id: int,
+) -> int:
+    tasks = conn.execute(
+        """
+        SELECT id, submission_mode, scheduled_for
+        FROM tasks
+        WHERE program_id = ?
+        ORDER BY position ASC, id ASC
+        """,
+        (program_id,),
+    ).fetchall()
+
+    for task in tasks:
+        exists = conn.execute(
+            """
+            SELECT id
+            FROM participant_tasks
+            WHERE task_id = ? AND participant_id = ?
+            LIMIT 1
+            """,
+            (task["id"], participant_id),
+        ).fetchone()
+        if exists is not None:
+            continue
+
+        conn.execute(
+            """
+            INSERT INTO participant_tasks (
+                task_id, participant_id, status, progress_percent, report_required,
+                soft_return_available, planned_for, completed_at, last_interaction_at
+            ) VALUES (?, ?, 'planned', 0, ?, 1, ?, NULL, ?)
+            """,
+            (
+                task["id"],
+                participant_id,
+                submission_requires_report(task["submission_mode"]),
+                task["scheduled_for"],
+                now_iso(),
+            ),
+        )
+
+    return len(tasks)
 
 
 def legacy_scope_from_context_row(legacy_context_row: sqlite3.Row | None) -> dict | None:
@@ -1228,6 +1413,178 @@ def switch_session_scope(payload: dict, context: RequestContext | None = None) -
     return {"me": get_me_state(resolved_context), "bootstrap": get_bootstrap_state(resolved_context)}
 
 
+def create_invitation_code(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    max_uses = max(1, int(payload.get("maxUses", 100)))
+    expires_at = str(payload.get("expiresAt", "")).strip() or None
+
+    with connect_db() as conn:
+        code = generate_invitation_code()
+        while conn.execute("SELECT id FROM invitation_codes WHERE code = ?", (code,)).fetchone() is not None:
+            code = generate_invitation_code()
+
+        conn.execute(
+            """
+            INSERT INTO invitation_codes (
+                program_id, code, max_uses, used_count, expires_at, is_active, created_at
+            ) VALUES (?, ?, ?, 0, ?, 1, ?)
+            """,
+            (context.program_id, code, max_uses, expires_at, now_iso()),
+        )
+        conn.commit()
+
+    return get_bootstrap_state(context)
+
+
+def join_program_by_invitation_code(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    if not context.is_authenticated or context.session_id is None or context.user_id is None:
+        raise AuthorizationError("Нужно войти в GoalMate, чтобы присоединиться по коду")
+
+    code = str(payload.get("code", "")).strip().upper()
+    if not code:
+        raise ValueError("Нужен код приглашения")
+
+    with connect_db() as conn:
+        invitation = conn.execute(
+            """
+            SELECT
+                ic.*,
+                p.organizer_id,
+                p.name AS program_name,
+                p.status AS program_status
+            FROM invitation_codes ic
+            JOIN programs p ON p.id = ic.program_id
+            WHERE upper(ic.code) = ? AND ic.is_active = 1
+            LIMIT 1
+            """,
+            (code,),
+        ).fetchone()
+        if invitation is None:
+            raise ValueError("Код приглашения не найден")
+        if invitation["expires_at"] and invitation["expires_at"] <= now_iso():
+            raise ValueError("Срок действия кода уже истёк")
+        if int(invitation["used_count"]) >= int(invitation["max_uses"]):
+            raise ValueError("Лимит использований этого кода уже исчерпан")
+
+        participant_id = resolve_participant_id_for_user(conn, context.user_id, context)
+        existing_membership = conn.execute(
+            """
+            SELECT *
+            FROM program_memberships
+            WHERE user_id = ? AND program_id = ? AND role = 'participant'
+            LIMIT 1
+            """,
+            (context.user_id, invitation["program_id"]),
+        ).fetchone()
+        already_joined = existing_membership is not None
+
+        if existing_membership is None:
+            conn.execute(
+                """
+                INSERT INTO program_memberships (
+                    user_id, program_id, participant_id, role, is_default, created_at
+                ) VALUES (?, ?, ?, 'participant', 0, ?)
+                """,
+                (context.user_id, invitation["program_id"], participant_id, now_iso()),
+            )
+        elif existing_membership["participant_id"] is None:
+            conn.execute(
+                """
+                UPDATE program_memberships
+                SET participant_id = ?
+                WHERE id = ?
+                """,
+                (participant_id, existing_membership["id"]),
+            )
+
+        total_tasks = ensure_program_participant_tasks(conn, invitation["program_id"], participant_id)
+        enrollment = conn.execute(
+            """
+            SELECT *
+            FROM enrollments
+            WHERE program_id = ? AND participant_id = ?
+            LIMIT 1
+            """,
+            (invitation["program_id"], participant_id),
+        ).fetchone()
+        if enrollment is None:
+            conn.execute(
+                """
+                INSERT INTO enrollments (
+                    program_id, participant_id, role, progress_percent, xp, completed_tasks,
+                    total_tasks, soft_return_count, at_risk, joined_at
+                ) VALUES (?, ?, 'participant', 0, 0, 0, ?, 0, 0, ?)
+                """,
+                (invitation["program_id"], participant_id, total_tasks, now_iso()),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE enrollments
+                SET total_tasks = CASE WHEN total_tasks < ? THEN ? ELSE total_tasks END
+                WHERE id = ?
+                """,
+                (total_tasks, total_tasks, enrollment["id"]),
+            )
+
+        ensure_program_team_membership(conn, invitation["program_id"], participant_id)
+
+        if not already_joined:
+            conn.execute(
+                """
+                UPDATE invitation_codes
+                SET used_count = used_count + 1
+                WHERE id = ?
+                """,
+                (invitation["id"],),
+            )
+
+        legacy_context = ensure_legacy_user_context(
+            conn,
+            context.user_id,
+            {
+                "organizer_id": invitation["organizer_id"],
+                "program_id": invitation["program_id"],
+                "participant_id": participant_id,
+                "primary_role": "participant",
+            },
+        )
+        upsert_session_scope(
+            conn,
+            context.session_id,
+            invitation["organizer_id"],
+            invitation["program_id"],
+            participant_id,
+        )
+        conn.execute(
+            """
+            UPDATE sessions
+            SET user_context_id = ?, last_seen_at = ?
+            WHERE id = ?
+            """,
+            (legacy_context["id"], now_iso(), context.session_id),
+        )
+        conn.commit()
+
+    resolved_context = resolve_session_context_from_session_id(context.session_id)
+    if resolved_context is None:
+        raise ValueError("Не удалось активировать новый поток")
+    return {
+        "me": get_me_state(resolved_context),
+        "bootstrap": get_bootstrap_state(resolved_context),
+        "joinedProgram": {
+            "id": invitation["program_id"],
+            "name": invitation["program_name"],
+            "status": invitation["program_status"],
+        },
+        "alreadyJoined": already_joined,
+        "code": code,
+    }
+
+
 def init_db(force_reset: bool = False) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ensure_sqlite_data_dir(DB_SETTINGS)
@@ -1376,6 +1733,19 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         programs,
+    )
+
+    invitation_codes = [
+        (1, 1, "SPRING26", 100, 0, None, 1, current_time),
+        (2, 2, "WINTER26", 50, 0, None, 1, current_time),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO invitation_codes (
+            id, program_id, code, max_uses, used_count, expires_at, is_active, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        invitation_codes,
     )
 
     modules = [
@@ -2098,6 +2468,7 @@ def get_bootstrap_state(context: RequestContext | None = None) -> dict:
             "builder": {
                 "modules": get_modules_with_tasks(conn, context.program_id),
                 "reusablePrograms": reusable_programs,
+                "invitationCodes": get_program_invitation_codes(conn, context.program_id),
             },
             "analytics": {
                 "dailyMetrics": metrics,
@@ -2468,7 +2839,7 @@ def create_task(payload: dict, context: RequestContext | None = None) -> dict:
                 (
                     new_task_id,
                     participant_id,
-                    1 if submission_mode in {"text", "photo", "voice"} else 0,
+                    submission_requires_report(submission_mode),
                     scheduled_for,
                     now_iso(),
                 ),
@@ -2760,6 +3131,13 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             if path == "/api/auth/logout":
                 auth_payload, session_cookie = logout_user(context)
                 self.send_json({"ok": True, "data": auth_payload}, extra_headers=[("Set-Cookie", session_cookie)])
+                return
+            if path == "/api/invitation-codes":
+                self.send_json({"ok": True, "data": create_invitation_code(payload, context)})
+                return
+            if path == "/api/invitation-codes/join":
+                join_payload = join_program_by_invitation_code(payload, context)
+                self.send_json({"ok": True, "data": join_payload})
                 return
             if path == "/api/me/scope":
                 self.send_json({"ok": True, "data": switch_session_scope(payload, context)})
