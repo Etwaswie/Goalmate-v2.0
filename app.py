@@ -3331,6 +3331,164 @@ def insert_task_record(
     return task_id
 
 
+def rebuild_program_enrollment_metrics(conn: sqlite3.Connection, program_id: int) -> None:
+    rows = conn.execute(
+        """
+        SELECT participant_id, soft_return_count, at_risk
+        FROM enrollments
+        WHERE program_id = ?
+        """,
+        (program_id,),
+    ).fetchall()
+
+    for row in rows:
+        participant_id = row["participant_id"]
+        stats = conn.execute(
+            """
+            SELECT
+                COUNT(pt.id) AS total_tasks,
+                SUM(CASE WHEN pt.status = 'completed' THEN 1 ELSE 0 END) AS completed_tasks,
+                COALESCE(SUM(CASE WHEN pt.status = 'completed' THEN t.points ELSE 0 END), 0) AS xp
+            FROM participant_tasks pt
+            JOIN tasks t ON t.id = pt.task_id
+            WHERE t.program_id = ? AND pt.participant_id = ?
+            """,
+            (program_id, participant_id),
+        ).fetchone()
+
+        total_tasks = int(stats["total_tasks"] or 0)
+        completed_tasks = int(stats["completed_tasks"] or 0)
+        xp = int(stats["xp"] or 0)
+        progress = round((completed_tasks / max(total_tasks, 1)) * 100, 1) if total_tasks else 0.0
+
+        conn.execute(
+            """
+            UPDATE enrollments
+            SET total_tasks = ?,
+                completed_tasks = ?,
+                xp = ?,
+                progress_percent = ?,
+                soft_return_count = ?,
+                at_risk = ?
+            WHERE program_id = ? AND participant_id = ?
+            """,
+            (
+                total_tasks,
+                completed_tasks,
+                xp,
+                progress,
+                row["soft_return_count"],
+                row["at_risk"],
+                program_id,
+                participant_id,
+            ),
+        )
+
+
+def adjust_enrollments_for_removed_tasks(
+    conn: sqlite3.Connection,
+    program_id: int,
+    removed_tasks: list[dict],
+) -> None:
+    for task in removed_tasks:
+        participant_rows = conn.execute(
+            """
+            SELECT participant_id, status
+            FROM participant_tasks
+            WHERE task_id = ?
+            """,
+            (task["id"],),
+        ).fetchall()
+
+        for participant_row in participant_rows:
+            enrollment = conn.execute(
+                """
+                SELECT total_tasks, completed_tasks, xp, soft_return_count, at_risk
+                FROM enrollments
+                WHERE program_id = ? AND participant_id = ?
+                """,
+                (program_id, participant_row["participant_id"]),
+            ).fetchone()
+            if enrollment is None:
+                continue
+
+            total_tasks = max(int(enrollment["total_tasks"]) - 1, 0)
+            completed_tasks = int(enrollment["completed_tasks"])
+            xp = int(enrollment["xp"])
+            if participant_row["status"] == "completed":
+                completed_tasks = max(completed_tasks - 1, 0)
+                xp = max(xp - int(task["points"]), 0)
+            progress = round((completed_tasks / max(total_tasks, 1)) * 100, 1) if total_tasks else 0.0
+
+            conn.execute(
+                """
+                UPDATE enrollments
+                SET total_tasks = ?,
+                    completed_tasks = ?,
+                    xp = ?,
+                    progress_percent = ?,
+                    soft_return_count = ?,
+                    at_risk = ?
+                WHERE program_id = ? AND participant_id = ?
+                """,
+                (
+                    total_tasks,
+                    completed_tasks,
+                    xp,
+                    progress,
+                    enrollment["soft_return_count"],
+                    enrollment["at_risk"],
+                    program_id,
+                    participant_row["participant_id"],
+                ),
+            )
+
+
+def adjust_enrollments_for_task_points_change(
+    conn: sqlite3.Connection,
+    program_id: int,
+    task_id: int,
+    old_points: int,
+    new_points: int,
+) -> None:
+    diff = int(new_points) - int(old_points)
+    if diff == 0:
+        return
+
+    participant_rows = conn.execute(
+        """
+        SELECT participant_id
+        FROM participant_tasks
+        WHERE task_id = ? AND status = 'completed'
+        """,
+        (task_id,),
+    ).fetchall()
+
+    for participant_row in participant_rows:
+        enrollment = conn.execute(
+            """
+            SELECT xp
+            FROM enrollments
+            WHERE program_id = ? AND participant_id = ?
+            """,
+            (program_id, participant_row["participant_id"]),
+        ).fetchone()
+        if enrollment is None:
+            continue
+        conn.execute(
+            """
+            UPDATE enrollments
+            SET xp = ?
+            WHERE program_id = ? AND participant_id = ?
+            """,
+            (
+                max(int(enrollment["xp"]) + diff, 0),
+                program_id,
+                participant_row["participant_id"],
+            ),
+        )
+
+
 def complete_task(participant_task_id: int, context: RequestContext | None = None, via_report: bool = False) -> dict:
     context = context or current_request_context()
     require_capability(context, "participant")
@@ -3589,6 +3747,170 @@ def create_task(payload: dict, context: RequestContext | None = None) -> dict:
             scheduled_for,
             soft_return_copy,
         )
+        conn.commit()
+    return get_bootstrap_state(context)
+
+
+def update_module(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    module_id = int(payload.get("moduleId", 0))
+    title = str(payload.get("title", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    week_label = str(payload.get("weekLabel", "")).strip()
+    if not module_id or not title:
+        raise ValueError("Нужны moduleId и название модуля")
+
+    with connect_db() as conn:
+        module = conn.execute(
+            "SELECT id FROM modules WHERE id = ? AND program_id = ?",
+            (module_id, context.program_id),
+        ).fetchone()
+        if module is None:
+            raise ValueError("Модуль не найден в текущем потоке")
+
+        conn.execute(
+            """
+            UPDATE modules
+            SET title = ?, description = ?, week_label = ?
+            WHERE id = ? AND program_id = ?
+            """,
+            (
+                title,
+                description or "Новый блок в конструкторе GoalMate.",
+                week_label or "Новая неделя",
+                module_id,
+                context.program_id,
+            ),
+        )
+        conn.commit()
+    return get_bootstrap_state(context)
+
+
+def delete_module(module_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    with connect_db() as conn:
+        module = conn.execute(
+            "SELECT id FROM modules WHERE id = ? AND program_id = ?",
+            (module_id, context.program_id),
+        ).fetchone()
+        if module is None:
+            raise ValueError("Модуль не найден в текущем потоке")
+
+        removed_tasks = [
+            row_to_dict(row)
+            for row in conn.execute(
+                "SELECT id, points FROM tasks WHERE module_id = ? AND program_id = ?",
+                (module_id, context.program_id),
+            ).fetchall()
+        ]
+        adjust_enrollments_for_removed_tasks(conn, context.program_id, removed_tasks)
+        conn.execute("DELETE FROM modules WHERE id = ? AND program_id = ?", (module_id, context.program_id))
+        conn.commit()
+    return get_bootstrap_state(context)
+
+
+def update_task(payload: dict, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    task_id = int(payload.get("taskId", 0))
+    module_id = int(payload.get("moduleId", 0))
+    title = str(payload.get("title", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    task_type = str(payload.get("taskType", "custom")).strip() or "custom"
+    submission_mode = str(payload.get("submissionMode", "text")).strip() or "text"
+    points = int(payload.get("points", 100))
+    estimated_minutes = int(payload.get("estimatedMinutes", 15))
+    scheduled_for = str(payload.get("scheduledFor", str(date.today() + timedelta(days=1))))
+    soft_return_copy = str(payload.get("softReturnCopy", "")).strip() or "Можно вернуться укороченной версией шага."
+    if not task_id or not module_id or not title:
+        raise ValueError("Нужны taskId, moduleId и название задания")
+
+    with connect_db() as conn:
+        task = conn.execute(
+            "SELECT id, points FROM tasks WHERE id = ? AND program_id = ?",
+            (task_id, context.program_id),
+        ).fetchone()
+        if task is None:
+            raise ValueError("Задание не найдено в текущем потоке")
+
+        module = conn.execute(
+            "SELECT id FROM modules WHERE id = ? AND program_id = ?",
+            (module_id, context.program_id),
+        ).fetchone()
+        if module is None:
+            raise ValueError("Нельзя привязать задание к модулю из другого потока")
+
+        conn.execute(
+            """
+            UPDATE tasks
+            SET module_id = ?,
+                title = ?,
+                description = ?,
+                task_type = ?,
+                submission_mode = ?,
+                points = ?,
+                estimated_minutes = ?,
+                scheduled_for = ?,
+                soft_return_copy = ?
+            WHERE id = ? AND program_id = ?
+            """,
+            (
+                module_id,
+                title,
+                description or "Новое задание из конструктора GoalMate.",
+                task_type,
+                submission_mode,
+                points,
+                estimated_minutes,
+                scheduled_for,
+                soft_return_copy,
+                task_id,
+                context.program_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE participant_tasks
+            SET report_required = ?,
+                planned_for = ?
+            WHERE task_id = ?
+            """,
+            (
+                submission_requires_report(submission_mode),
+                scheduled_for,
+                task_id,
+            ),
+        )
+        adjust_enrollments_for_task_points_change(
+            conn,
+            context.program_id,
+            task_id,
+            int(task["points"]),
+            points,
+        )
+        conn.commit()
+    return get_bootstrap_state(context)
+
+
+def delete_task(task_id: int, context: RequestContext | None = None) -> dict:
+    context = context or current_request_context()
+    require_capability(context, "organizer")
+
+    with connect_db() as conn:
+        task = conn.execute(
+            "SELECT id, points FROM tasks WHERE id = ? AND program_id = ?",
+            (task_id, context.program_id),
+        ).fetchone()
+        if task is None:
+            raise ValueError("Задание не найдено в текущем потоке")
+
+        adjust_enrollments_for_removed_tasks(conn, context.program_id, [row_to_dict(task)])
+        conn.execute("DELETE FROM tasks WHERE id = ? AND program_id = ?", (task_id, context.program_id))
         conn.commit()
     return get_bootstrap_state(context)
 
@@ -3949,6 +4271,12 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             if path == "/api/builder/modules":
                 self.send_json({"ok": True, "data": create_module(payload, context)})
                 return
+            if path == "/api/builder/modules/update":
+                self.send_json({"ok": True, "data": update_module(payload, context)})
+                return
+            if path == "/api/builder/tasks/update":
+                self.send_json({"ok": True, "data": update_task(payload, context)})
+                return
             if path == "/api/builder/tasks":
                 self.send_json({"ok": True, "data": create_task(payload, context)})
                 return
@@ -3980,6 +4308,14 @@ class GoalMateHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/programs/") and path.endswith("/duplicate"):
                 program_id = int(path.split("/")[3])
                 self.send_json({"ok": True, "data": duplicate_program(program_id, context)})
+                return
+            if path.startswith("/api/builder/modules/") and path.endswith("/delete"):
+                module_id = int(path.split("/")[4])
+                self.send_json({"ok": True, "data": delete_module(module_id, context)})
+                return
+            if path.startswith("/api/builder/tasks/") and path.endswith("/delete"):
+                task_id = int(path.split("/")[4])
+                self.send_json({"ok": True, "data": delete_task(task_id, context)})
                 return
         except ValueError as error:
             self.send_json({"ok": False, "error": str(error)}, status=400)

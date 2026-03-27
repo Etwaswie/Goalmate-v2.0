@@ -279,6 +279,20 @@ function openJoinCodeModal() {
   renderModal();
 }
 
+function openEditModuleModal(moduleId) {
+  const module = state.app?.builder?.modules?.find((item) => item.id === moduleId);
+  if (!module) return;
+  state.modal = { type: "edit-module", moduleId };
+  renderModal();
+}
+
+function openEditTaskModal(taskId) {
+  const task = state.app?.builder?.modules?.flatMap((item) => item.tasks || []).find((item) => item.id === taskId);
+  if (!task) return;
+  state.modal = { type: "edit-task", taskId };
+  renderModal();
+}
+
 function closeModal() {
   state.modal = null;
   renderModal();
@@ -1011,7 +1025,7 @@ function renderBuilderView() {
             <div class="eyebrow">No-code конструктор</div>
             <h3>Структура текущего марафона</h3>
           </div>
-          <button class="secondary-button" type="button" data-action="duplicate-program" data-id="1">Клонировать поток</button>
+          <button class="secondary-button" type="button" data-action="duplicate-program" data-id="${state.app.program.id}">Клонировать поток</button>
         </div>
         <div class="module-stack" style="margin-top:18px">
           ${builder.modules
@@ -1023,7 +1037,11 @@ function renderBuilderView() {
                       <div class="eyebrow">${escapeHtml(module.week_label)}</div>
                       <h3>${escapeHtml(module.title)}</h3>
                     </div>
-                    <span class="badge neutral">${escapeHtml(module.tasks.length)} задач</span>
+                    <div class="button-row">
+                      <span class="badge neutral">${escapeHtml(module.tasks.length)} задач</span>
+                      <button class="inline-button" type="button" data-action="edit-module" data-id="${module.id}">Редактировать</button>
+                      <button class="inline-button danger-button" type="button" data-action="delete-module" data-id="${module.id}">Удалить</button>
+                    </div>
                   </div>
                   <p class="subtle">${escapeHtml(module.description)}</p>
                   <div class="module-tasks">
@@ -1031,8 +1049,16 @@ function renderBuilderView() {
                       .map(
                         (task) => `
                           <div class="module-task-pill">
-                            <strong>${escapeHtml(task.title)}</strong>
-                            <span class="subtle">${escapeHtml(task.task_type)} • ${escapeHtml(task.points)} XP • ${escapeHtml(task.submission_mode)}</span>
+                            <div class="task-head">
+                              <div>
+                                <strong>${escapeHtml(task.title)}</strong>
+                                <span class="subtle">${escapeHtml(task.task_type)} • ${escapeHtml(task.points)} XP • ${escapeHtml(task.submission_mode)}</span>
+                              </div>
+                              <div class="button-row">
+                                <button class="inline-button" type="button" data-action="edit-task" data-id="${task.id}">Редактировать</button>
+                                <button class="inline-button danger-button" type="button" data-action="delete-task" data-id="${task.id}">Удалить</button>
+                              </div>
+                            </div>
                           </div>
                         `
                       )
@@ -1617,6 +1643,104 @@ function renderModal() {
     `;
   }
 
+  if (state.modal.type === "edit-module") {
+    const module = state.app.builder.modules.find((item) => item.id === state.modal.moduleId);
+    modalCard.innerHTML = `
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Content CRUD</div>
+          <h3>Редактировать модуль</h3>
+        </div>
+        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
+      </div>
+      <form id="module-edit-form" style="margin-top:18px">
+        <input type="hidden" name="moduleId" value="${module.id}" />
+        <div class="form-grid">
+          <label>
+            Название модуля
+            <input name="title" value="${escapeHtml(module.title)}" required />
+          </label>
+          <label>
+            Лейбл недели
+            <input name="weekLabel" value="${escapeHtml(module.week_label)}" required />
+          </label>
+        </div>
+        <label>
+          Описание
+          <textarea name="description">${escapeHtml(module.description || "")}</textarea>
+        </label>
+        <button class="primary-button" type="submit">Сохранить модуль</button>
+      </form>
+    `;
+  }
+
+  if (state.modal.type === "edit-task") {
+    const task = state.app.builder.modules.flatMap((item) => item.tasks || []).find((item) => item.id === state.modal.taskId);
+    modalCard.innerHTML = `
+      <div class="table-toolbar">
+        <div>
+          <div class="eyebrow">Content CRUD</div>
+          <h3>Редактировать задание</h3>
+        </div>
+        <button class="inline-button" type="button" data-close-modal="true">Закрыть</button>
+      </div>
+      <form id="task-edit-form" style="margin-top:18px">
+        <input type="hidden" name="taskId" value="${task.id}" />
+        <div class="form-grid">
+          <label>
+            Модуль
+            <select name="moduleId" required>
+              ${state.app.builder.modules
+                .map(
+                  (module) => `
+                    <option value="${module.id}" ${module.id === task.module_id ? "selected" : ""}>
+                      ${escapeHtml(module.week_label)} / ${escapeHtml(module.title)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Название
+            <input name="title" value="${escapeHtml(task.title)}" required />
+          </label>
+          <label>
+            Тип
+            <input name="taskType" value="${escapeHtml(task.task_type)}" required />
+          </label>
+          <label>
+            Формат сдачи
+            <select name="submissionMode">
+              ${["text", "photo", "voice", "checklist"].map((mode) => `<option value="${mode}" ${mode === task.submission_mode ? "selected" : ""}>${mode}</option>`).join("")}
+            </select>
+          </label>
+          <label>
+            XP
+            <input name="points" type="number" min="10" value="${escapeHtml(task.points)}" required />
+          </label>
+          <label>
+            Минуты
+            <input name="estimatedMinutes" type="number" min="1" value="${escapeHtml(task.estimated_minutes)}" required />
+          </label>
+          <label>
+            Дата
+            <input name="scheduledFor" type="date" value="${escapeHtml(task.scheduled_for)}" required />
+          </label>
+          <label>
+            Мягкий возврат
+            <input name="softReturnCopy" value="${escapeHtml(task.soft_return_copy)}" />
+          </label>
+        </div>
+        <label>
+          Описание
+          <textarea name="description">${escapeHtml(task.description || "")}</textarea>
+        </label>
+        <button class="primary-button" type="submit">Сохранить задание</button>
+      </form>
+    `;
+  }
+
   modal.classList.remove("hidden");
 }
 
@@ -1688,6 +1812,16 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "edit-module") {
+    openEditModuleModal(id);
+    return;
+  }
+
+  if (action === "edit-task") {
+    openEditTaskModal(id);
+    return;
+  }
+
   if (action === "goto-view") {
     const nextView = actionButton.dataset.view;
     if (nextView) {
@@ -1713,6 +1847,20 @@ document.addEventListener("click", async (event) => {
   if (action === "duplicate-program") {
     await performRequest(`/api/programs/${id}/duplicate`);
     showToast("Программа клонирована");
+    return;
+  }
+
+  if (action === "delete-module") {
+    if (!window.confirm("Удалить модуль и все задания внутри?")) return;
+    await performRequest(`/api/builder/modules/${id}/delete`);
+    showToast("Модуль удалён");
+    return;
+  }
+
+  if (action === "delete-task") {
+    if (!window.confirm("Удалить это задание из потока?")) return;
+    await performRequest(`/api/builder/tasks/${id}/delete`);
+    showToast("Задание удалено");
     return;
   }
 
@@ -1818,6 +1966,13 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (form.id === "module-edit-form") {
+    payload.moduleId = Number(payload.moduleId);
+    await performRequest("/api/builder/modules/update", payload);
+    showToast("Модуль обновлён");
+    return;
+  }
+
   if (form.id === "task-form") {
     payload.moduleId = Number(payload.moduleId);
     payload.points = Number(payload.points);
@@ -1825,6 +1980,16 @@ document.addEventListener("submit", async (event) => {
     await performRequest("/api/builder/tasks", payload);
     form.reset();
     showToast("Задание добавлено в поток");
+    return;
+  }
+
+  if (form.id === "task-edit-form") {
+    payload.taskId = Number(payload.taskId);
+    payload.moduleId = Number(payload.moduleId);
+    payload.points = Number(payload.points);
+    payload.estimatedMinutes = Number(payload.estimatedMinutes);
+    await performRequest("/api/builder/tasks/update", payload);
+    showToast("Задание обновлено");
     return;
   }
 
