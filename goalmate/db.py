@@ -101,7 +101,9 @@ class PostgresCompatConnection:
 
     def executemany(self, statement: str, params_seq: Iterable[Sequence[Any]]) -> Any:
         translated_statement = translate_statement_for_postgres(statement)
-        return self._connection.executemany(translated_statement, params_seq)
+        for params in params_seq:
+            self._connection.execute(translated_statement, params)
+        return None
 
     def executescript(self, script: str) -> None:
         for statement in split_sql_script(script):
